@@ -1,0 +1,25 @@
+# Credentials & Secrets
+credentials.json
+token.json
+.env
+
+# Logs and Data
+gmail_agent.log
+llm_cache.db
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / OS Files
+.DS_Store
+.vscode/
+
+# Pytest / Testing
+.pytest_cache/
