@@ -307,7 +307,53 @@ def write_audit_log(stats: dict):
 # ════════════════════════════════════════════════════════════
 
 def authenticate():
+    """
+    Dual-mode authentication:
+      • Streamlit Cloud  → reads credentials + token from st.secrets (no files needed)
+      • Local dev        → reads credentials.json / token.json from disk (original flow)
+
+    To deploy on Streamlit Cloud, add these secrets in the dashboard:
+      [google_credentials]   ← paste the full contents of credentials.json
+      [google_token]         ← paste the full contents of token.json
+    """
     creds = None
+
+    # ── Try Streamlit secrets first (cloud deployment) ──────────────────────
+    try:
+        import streamlit as st
+
+        if "google_token" in st.secrets:
+            token_info = dict(st.secrets["google_token"])
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+
+        if creds and creds.valid:
+            return creds
+
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            return creds
+
+        # Token missing or expired with no refresh — try to build from credentials
+        if "google_credentials" in st.secrets:
+            import json
+            cred_info = dict(st.secrets["google_credentials"])
+            # Handle nested installed/web key if present
+            if "installed" in cred_info:
+                cred_info = cred_info["installed"]
+            elif "web" in cred_info:
+                cred_info = cred_info["web"]
+            raise RuntimeError(
+                "Streamlit Cloud: google_token secret is missing or expired.\n"
+                "Re-authenticate locally, copy the new token.json contents into "
+                "Streamlit Cloud secrets under [google_token], then redeploy."
+            )
+
+    except ImportError:
+        pass  # streamlit not available — fall through to local file auth
+    except KeyError:
+        pass  # secrets not configured — fall through to local file auth
+
+    # ── Local file auth (original flow) ─────────────────────────────────────
     if os.path.exists("token.json"):
         try:
             creds = Credentials.from_authorized_user_file("token.json", SCOPES)
@@ -323,13 +369,14 @@ def authenticate():
             flow  = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(
                 port=8080,
-                access_type="offline",   # ensures refresh_token is returned
-                prompt="consent",        # forces consent screen even if previously approved
+                access_type="offline",
+                prompt="consent",
             )
         with open("token.json", "w") as fh:
             fh.write(creds.to_json())
 
     return creds
+
 
 
 # ════════════════════════════════════════════════════════════

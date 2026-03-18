@@ -2,6 +2,7 @@
 credentials.json
 token.json
 .env
+.streamlit/secrets.toml
 
 # Logs and Data
 gmail_agent.log
