@@ -319,39 +319,44 @@ def authenticate():
     creds = None
 
     # ── Try Streamlit secrets first (cloud deployment) ──────────────────────
-    try:
-        import streamlit as st
+    def _get_secret(key: str):
+        """
+        Safely probe st.secrets without crashing when secrets.toml is absent.
+        Catches ImportError (streamlit not installed), KeyError (key missing),
+        and StreamlitSecretNotFoundError (no secrets file at all).
+        """
+        try:
+            import streamlit as st
+            return st.secrets.get(key)
+        except Exception:
+            return None
 
-        if "google_token" in st.secrets:
-            token_info = dict(st.secrets["google_token"])
+    token_secret = _get_secret("google_token")
+
+    if token_secret is not None:
+        try:
+            token_info = dict(token_secret)
             creds = Credentials.from_authorized_user_info(token_info, SCOPES)
 
-        if creds and creds.valid:
-            return creds
+            if creds and creds.valid:
+                return creds
 
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            return creds
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                return creds
 
-        # Token missing or expired with no refresh — try to build from credentials
-        if "google_credentials" in st.secrets:
-            import json
-            cred_info = dict(st.secrets["google_credentials"])
-            # Handle nested installed/web key if present
-            if "installed" in cred_info:
-                cred_info = cred_info["installed"]
-            elif "web" in cred_info:
-                cred_info = cred_info["web"]
+        except Exception as e:
+            log.warning(f"Streamlit secrets auth failed: {e} — falling back to local files")
+            creds = None
+
+        # Token missing or expired with no refresh path
+        cred_secret = _get_secret("google_credentials")
+        if cred_secret is not None:
             raise RuntimeError(
                 "Streamlit Cloud: google_token secret is missing or expired.\n"
                 "Re-authenticate locally, copy the new token.json contents into "
                 "Streamlit Cloud secrets under [google_token], then redeploy."
             )
-
-    except ImportError:
-        pass  # streamlit not available — fall through to local file auth
-    except KeyError:
-        pass  # secrets not configured — fall through to local file auth
 
     # ── Local file auth (original flow) ─────────────────────────────────────
     if os.path.exists("token.json"):
@@ -366,6 +371,12 @@ def authenticate():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
+            if not os.path.exists("credentials.json"):
+                raise RuntimeError(
+                    "Authentication failed: credentials.json not found and no Streamlit secrets configured.\n"
+                    "For Streamlit Cloud: add [google_token] to your app's Secrets in the dashboard.\n"
+                    "For local dev: place credentials.json in the project folder and run once to generate token.json."
+                )
             flow  = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(
                 port=8080,
