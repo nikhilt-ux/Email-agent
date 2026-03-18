@@ -308,55 +308,53 @@ def write_audit_log(stats: dict):
 
 def authenticate():
     """
-    Dual-mode authentication:
-      • Streamlit Cloud  → reads credentials + token from st.secrets (no files needed)
-      • Local dev        → reads credentials.json / token.json from disk (original flow)
+    Three-mode authentication (tried in order):
 
-    To deploy on Streamlit Cloud, add these secrets in the dashboard:
-      [google_credentials]   ← paste the full contents of credentials.json
-      [google_token]         ← paste the full contents of token.json
+    1. GOOGLE_TOKEN_JSON env var  → set this in Railway/Render/any platform dashboard.
+                                    Value = full contents of token.json as a JSON string.
+    2. st.secrets google_token   → Streamlit Cloud secrets dashboard.
+    3. Local files               → token.json / credentials.json on disk (dev only).
     """
+    import json as _json
     creds = None
 
-    # ── Try Streamlit secrets first (cloud deployment) ──────────────────────
-    def _get_secret(key: str):
-        """
-        Safely probe st.secrets without crashing when secrets.toml is absent.
-        Catches ImportError (streamlit not installed), KeyError (key missing),
-        and StreamlitSecretNotFoundError (no secrets file at all).
-        """
+    # ── Mode 1: GOOGLE_TOKEN_JSON environment variable (Railway, Render, etc.) ─
+    token_json_str = os.environ.get("GOOGLE_TOKEN_JSON", "").strip()
+    if token_json_str:
         try:
-            import streamlit as st
-            return st.secrets.get(key)
-        except Exception:
-            return None
-
-    token_secret = _get_secret("google_token")
-
-    if token_secret is not None:
-        try:
-            token_info = dict(token_secret)
+            token_info = _json.loads(token_json_str)
             creds = Credentials.from_authorized_user_info(token_info, SCOPES)
-
             if creds and creds.valid:
                 return creds
-
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
                 return creds
-
         except Exception as e:
-            log.warning(f"Streamlit secrets auth failed: {e} — falling back to local files")
+            log.warning(f"GOOGLE_TOKEN_JSON parse/auth failed: {e}")
             creds = None
 
-        # Token missing or expired with no refresh path
-        cred_secret = _get_secret("google_credentials")
-        if cred_secret is not None:
-            raise RuntimeError(
-                "Streamlit Cloud: google_token secret is missing or expired.\n"
-                "Re-authenticate locally, copy the new token.json contents into "
-                "Streamlit Cloud secrets under [google_token], then redeploy."
-            )
+    # ── Mode 2: Streamlit secrets (Streamlit Cloud) ───────────────────────────
+    if creds is None:
+        def _get_secret(key: str):
+            try:
+                import streamlit as st
+                return st.secrets.get(key)
+            except Exception:
+                return None
+
+        token_secret = _get_secret("google_token")
+        if token_secret is not None:
+            try:
+                token_info = dict(token_secret)
+                creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+                if creds and creds.valid:
+                    return creds
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                    return creds
+            except Exception as e:
+                log.warning(f"st.secrets auth failed: {e}")
+                creds = None
 
     # ── Local file auth (original flow) ─────────────────────────────────────
     if os.path.exists("token.json"):
