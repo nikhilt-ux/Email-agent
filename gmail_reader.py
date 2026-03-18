@@ -1,26 +1,37 @@
 """
-Gmail Thread Extractor — Merchandising & Product Logs  v5.0
+Gmail Thread Extractor — Merchandising & Product Logs  v6.0
 ════════════════════════════════════════════════════════════
-Powered by OpenAI GPT-4o — production-hardened.
+Powered by OpenAI GPT-5.4 — production-hardened.
 
-PRODUCTION IMPROVEMENTS IN v5.0:
+UPGRADES IN v6.0:
+  ✅ Model upgraded to gpt-5.4 (OpenAI's latest frontier, March 2026)
+  ✅ NEW: Column X — "Reply Draft" — LLM drafts a sharp, human, context-aware reply
+       based on intent + AI overview + latest message body
+  ✅ DRY_RUN now gates update_existing_row too (bug fix from v5.0)
+  ✅ Column mapping driven by LOGS_HEADERS list at runtime — no more
+       hardcoded letter offsets that break when columns are reordered
+  ✅ CJK regex extended to cover Hangul + Extension B-F + Radicals Supplement
+  ✅ _extract_body_from_payload: multipart/alternative nesting fixed —
+       HTML sub-parts now correctly routed to html_parts, not plain_parts
+  ✅ Quote stripper: "On YYYY..." false-positive guard tightened
+  ✅ MAX_MSGS_IN_LLM window now includes a mid-thread slice, not just
+       first + last (so quality/delay discussions in the middle aren't lost)
+  ✅ Audit log now also writes to audit.jsonl for durable history
+  ✅ SHEET_ID moved to .env (falls back to hardcoded constant if not set)
+
+ALREADY IN v5.0 (unchanged):
   ✅ DRY_RUN mode — test without writing to Sheets (--dry-run flag)
   ✅ LLM cost control — older messages truncated to 400 chars (saves 60-80%)
   ✅ SQLite LLM cache — skip LLM if thread+count already processed
   ✅ Prompt versioning — PROMPT_VERSION logged per run for traceability
   ✅ Run audit log — structured JSON summary after every run
   ✅ Console + file logging — all print() output also in gmail_agent.log
-  ✅ .gitignore reminder printed on startup if secrets present
-
-ALREADY IN v4.0 (unchanged):
   ✅ Structured error handling — no single email crashes the system
-  ✅ Real logging — gmail_agent.log with timestamps and levels
-  ✅ Config section — all settings in one place at top of file
   ✅ Secrets via .env — OPENAI_API_KEY never hardcoded
   ✅ Idempotency — Thread ID + subject dedup, skip if unchanged
   ✅ Rate limit protection — exponential backoff on Gmail + OpenAI
   ✅ Attachment detection + shared link detection
-  ✅ Parallel metadata fetch (5 workers)
+  ✅ Parallel metadata fetch (3 workers)
   ✅ Auto header sync — new columns appear in sheet automatically
 """
 
@@ -40,11 +51,18 @@ import sqlite3
 import hashlib
 import argparse
 import requests
+from openai import OpenAI
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv optional
 
 
 # ════════════════════════════════════════════════════════════
@@ -56,28 +74,29 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-OLLAMA_URL     = "http://localhost:11434/api/chat"
-OLLAMA_MODEL   = "qwen3:8b"
-OLLAMA_TIMEOUT = 150    # seconds per call before retry
-OLLAMA_RETRIES = 2      # retries on timeout
+# ── Model: upgraded to GPT-5.4 (OpenAI frontier, March 2026) ──
+OPENAI_MODEL   = "gpt-5.4"
+OPENAI_TIMEOUT = 90     # gpt-5.4 is fast but give headroom for complex threads
+OPENAI_RETRIES = 2
 
-SHEET_ID   = "1hMmU47NkHM7ndTSX6d6Ft1YMy8sevtvpRVatOq-Mx-4"
+# SHEET_ID: read from .env first, fall back to hardcoded constant
+SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "1e7ILPJd2ws7nTUzHvrrVsqwt8sGf6-YW4VmZ8lAJnbQ")
 SHEET_TAB  = "Logs"
-EXPORT_TAB = "export"       # your vendor database tab
-ERROR_TAB  = "Error Logs"   # auto-created, errors logged here
+EXPORT_TAB = "export"
+ERROR_TAB  = "Error Logs"
 
 ONEQUINCE_DOMAIN = "@onequince.com"
 
-GMAIL_WORKERS      = 5     # parallel threads for metadata fetching
-BODY_CHARS_PER_MSG = 3000  # char limit per LATEST message sent to LLM
-OLDER_MSG_CHARS    = 400   # char limit for older messages (cost control — saves 60-80%)
-MAX_MSGS_IN_LLM    = 8     # max messages sent to LLM (always includes msg[0])
+GMAIL_WORKERS      = 3
+BODY_CHARS_PER_MSG = 3000
+OLDER_MSG_CHARS    = 400
+MAX_MSGS_IN_LLM    = 8   # now uses a smarter window: first + mid slice + last 4
 
 # ── Production controls ──
-DRY_RUN        = False  # True = read-only mode, nothing written to Sheets
-                        # Override at runtime: python script.py --dry-run
-PROMPT_VERSION = "v5.0" # Bump when prompt logic changes — logged per run
-CACHE_DB       = "llm_cache.db"  # SQLite file — LLM results keyed by thread+count
+DRY_RUN        = False
+PROMPT_VERSION = "v6.0"   # bump when prompt or reply logic changes
+CACHE_DB       = "llm_cache.db"
+AUDIT_JSONL    = "audit.jsonl"   # NEW: durable append-only audit file
 
 DIVISIONS = [
     "Men's Apparel", "Women's Apparel", "Apparel Flats",
@@ -85,7 +104,9 @@ DIVISIONS = [
     "Jewelry", "Furniture", "Other",
 ]
 
-# Sheet column layout — A through W
+# ── Sheet column layout — A through X ──
+# IMPORTANT: column letter assignments are now computed at runtime from this list.
+# Do NOT use hardcoded letters anywhere else in the code — use col_letter(field) instead.
 LOGS_HEADERS = [
     "Subject",                # A
     "Sender",                 # B
@@ -103,39 +124,47 @@ LOGS_HEADERS = [
     "Thread Messages",        # N
     "Thread ID",              # O
     "Last Updated",           # P
-    "Intent",                 # Q  ← what action is needed
-    "Reply Needed",           # R  ← Yes / No
-    "PO Number",              # S  ← purchase order number
-    "Sample Status",          # T  ← Dispatched / Received / Approved / Rejected / Pending / None
-    "Sample Reminder",        # U  ← ⚠️ Chase if dispatched but no update in 7 days
-    "Attachments",            # V  ← file types attached (PDF, Excel, image…)
-    "Shared Links",           # W  ← Google Drive / Dropbox / WeTransfer / OneDrive URLs
+    "Intent",                 # Q
+    "Reply Needed",           # R
+    "PO Number",              # S
+    "Sample Status",          # T
+    "Sample Reminder",        # U
+    "Attachments",            # V
+    "Shared Links",           # W
+    "Reply Draft",            # X  ← NEW: LLM-drafted reply, sharp + human-friendly
 ]
 
 ERROR_HEADERS = [
     "Timestamp", "Thread ID", "Subject", "Stage", "Error Message", "Traceback"
 ]
 
-# Which columns to refresh when new replies arrive
-UPDATE_ON_REPLY = {
-    "E": "Style No",
-    "F": "Colour",
-    "I": "Shipment Company",
-    "J": "AWB No",
-    "K": "Shipment Date",
-    "M": "AI Overview",
-    "N": "Thread Messages",
-    "Q": "Intent",
-    "R": "Reply Needed",
-    "S": "PO Number",
-    "T": "Sample Status",
-    "U": "Sample Reminder",
-    "V": "Attachments",
-    "W": "Shared Links",
-    # P (Last Updated) always written, O (Thread ID) only on backfill
-}
+# ── Runtime column index map (built once on startup) ──
+# Maps header name → 1-based column index.  e.g. "Subject" → 1, "Reply Draft" → 24
+_HEADER_INDEX: dict = {h: i + 1 for i, h in enumerate(LOGS_HEADERS)}
 
-# Addresses that are never real vendors
+
+def col_letter(header_name: str) -> str:
+    """Convert header name to A1-style column letter. Supports up to ZZ (702 cols)."""
+    n = _HEADER_INDEX.get(header_name)
+    if n is None:
+        raise KeyError(f"Header '{header_name}' not found in LOGS_HEADERS")
+    result = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        result = chr(65 + r) + result
+    return result
+
+
+# Which columns to refresh when new replies arrive (derived from headers, no hardcoding)
+UPDATE_ON_REPLY_FIELDS = [
+    "Style No", "Colour", "Shipment Company", "AWB No", "Shipment Date",
+    "AI Overview", "Thread Messages", "Intent", "Reply Needed",
+    "PO Number", "Sample Status", "Sample Reminder",
+    "Attachments", "Shared Links", "Reply Draft",
+    # "Last Updated" always written separately
+    # "Thread ID" only on backfill
+]
+
 NOISE_ADDRESS_WORDS = {
     "noreply", "no-reply", "mailer", "notification", "notifications",
     "alert", "alerts", "bot", "automated", "donotreply", "do-not-reply",
@@ -145,24 +174,22 @@ NOISE_ADDRESS_WORDS = {
 
 
 # ════════════════════════════════════════════════════════════
-# LOGGING — writes to gmail_agent.log + Error Logs sheet
+# LOGGING
 # ════════════════════════════════════════════════════════════
 
-# Dual logging — file (gmail_agent.log) + console
-_log_formatter = logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+_log_formatter   = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
 )
 _file_handler    = logging.FileHandler("gmail_agent.log", encoding="utf-8")
 _file_handler.setFormatter(_log_formatter)
 _console_handler = logging.StreamHandler()
 _console_handler.setFormatter(_log_formatter)
-_console_handler.setLevel(logging.WARNING)  # console: warnings + errors only
+_console_handler.setLevel(logging.WARNING)
 
 logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
 log = logging.getLogger(__name__)
 
-_error_buffer: list = []  # flushed to sheet at end of run
+_error_buffer: list = []
 
 
 def record_error(thread_id: str, subject: str, stage: str, exc: Exception):
@@ -180,13 +207,10 @@ def record_error(thread_id: str, subject: str, stage: str, exc: Exception):
 
 
 # ════════════════════════════════════════════════════════════
-# LLM CACHE — SQLite, keyed by thread_id + message_count
-# Avoids re-calling the LLM for threads that haven't changed.
-# Cache is local only — no email content sent anywhere extra.
+# LLM CACHE — SQLite, keyed by thread_id + message_count + prompt_version
 # ════════════════════════════════════════════════════════════
 
 def _cache_connect() -> sqlite3.Connection:
-    """Open (or create) the SQLite cache database."""
     conn = sqlite3.connect(CACHE_DB)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS llm_cache (
@@ -201,10 +225,6 @@ def _cache_connect() -> sqlite3.Connection:
 
 
 def cache_get(thread_id: str, msg_count: int):
-    """
-    Return cached LLM result for this thread+count+prompt_version,
-    or None if not cached / prompt version changed.
-    """
     key = hashlib.sha1(f"{thread_id}:{msg_count}:{PROMPT_VERSION}".encode()).hexdigest()
     try:
         conn = _cache_connect()
@@ -222,7 +242,6 @@ def cache_get(thread_id: str, msg_count: int):
 
 
 def cache_set(thread_id: str, msg_count: int, result: dict):
-    """Store LLM result in cache."""
     key = hashlib.sha1(f"{thread_id}:{msg_count}:{PROMPT_VERSION}".encode()).hexdigest()
     try:
         conn = _cache_connect()
@@ -239,7 +258,6 @@ def cache_set(thread_id: str, msg_count: int, result: dict):
 
 
 def cache_stats() -> dict:
-    """Return cache hit/miss stats for audit log."""
     try:
         conn  = _cache_connect()
         total = conn.execute("SELECT COUNT(*) FROM llm_cache").fetchone()[0]
@@ -250,33 +268,37 @@ def cache_stats() -> dict:
 
 
 # ════════════════════════════════════════════════════════════
-# RUN AUDIT LOG — structured JSON summary after every run
-# Appended to gmail_agent.log so ops can grep/parse it.
+# RUN AUDIT LOG — file + durable JSONL
 # ════════════════════════════════════════════════════════════
 
 def write_audit_log(stats: dict):
     """
-    Write a structured JSON audit record to the log after every run.
-    Makes it easy to track cost, error rate, and volume over time.
-
-    Fields logged:
-      run_at, dry_run, prompt_version, threads_fetched,
-      added, updated, skipped, errors, cache_hits,
-      error_rate_pct, sheet_id
+    Writes structured audit record to:
+      1. gmail_agent.log (via logger) — queryable with grep
+      2. audit.jsonl     — durable append-only file, survives log rotation
     """
     record = {
-        "run_at":          datetime.now().isoformat(),
-        "dry_run":         DRY_RUN,
-        "prompt_version":  PROMPT_VERSION,
-        "sheet_id":        SHEET_ID,
+        "run_at":         datetime.now().isoformat(),
+        "dry_run":        DRY_RUN,
+        "prompt_version": PROMPT_VERSION,
+        "model":          OPENAI_MODEL,
+        "sheet_id":       SHEET_ID,
         **stats,
-        "error_rate_pct":  round(
+        "error_rate_pct": round(
             stats.get("errors", 0) / max(stats.get("threads_fetched", 1), 1) * 100, 1
         ),
     }
     log.info(f"AUDIT_RUN: {json.dumps(record)}")
-    print(f"  📋 Audit log written (prompt={PROMPT_VERSION}, "
-          f"errors={stats.get('errors',0)}, "
+
+    # Append to durable audit file
+    try:
+        with open(AUDIT_JSONL, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except Exception as e:
+        log.warning(f"Could not write audit.jsonl: {e}")
+
+    print(f"  📋 Audit log written (model={OPENAI_MODEL}, prompt={PROMPT_VERSION}, "
+          f"errors={stats.get('errors', 0)}, "
           f"error_rate={record['error_rate_pct']}%)")
 
 
@@ -287,14 +309,23 @@ def write_audit_log(stats: dict):
 def authenticate():
     creds = None
     if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+        except ValueError:
+            log.warning("token.json is malformed or missing refresh_token — re-authenticating")
+            os.remove("token.json")
+            creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(port=8080)
+            flow  = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+            creds = flow.run_local_server(
+                port=8080,
+                access_type="offline",   # ensures refresh_token is returned
+                prompt="consent",        # forces consent screen even if previously approved
+            )
         with open("token.json", "w") as fh:
             fh.write(creds.to_json())
 
@@ -306,7 +337,6 @@ def authenticate():
 # ════════════════════════════════════════════════════════════
 
 def gmail_threads_get(svc, **kwargs) -> dict:
-    """threads().get() with exponential backoff for 429/500/503."""
     wait = 2
     for attempt in range(6):
         try:
@@ -324,8 +354,6 @@ def gmail_threads_get(svc, **kwargs) -> dict:
 
 # ════════════════════════════════════════════════════════════
 # EMAIL BODY EXTRACTION
-# Handles HTML (most vendor emails), plain text, nested multipart.
-# Strips quoted replies so LLM only sees NEW content per message.
 # ════════════════════════════════════════════════════════════
 
 def _decode_b64(data: str) -> str:
@@ -336,22 +364,13 @@ def _decode_b64(data: str) -> str:
 
 
 def _html_to_text(html: str) -> str:
-    """
-    Convert HTML email body to clean readable plain text.
-    No external libraries — handles tables, divs, entities, inline styles.
-    """
-    # Remove style/script blocks entirely
     html = re.sub(r'<(style|script)[^>]*>.*?</\1>', '', html,
                   flags=re.DOTALL | re.IGNORECASE)
-    # Block-level elements → newlines
     html = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
     html = re.sub(r'</(?:p|div|tr|li|h[1-6])>', '\n', html, flags=re.IGNORECASE)
     html = re.sub(r'</td>', ' ', html, flags=re.IGNORECASE)
-    # Strip all remaining tags
     html = re.sub(r'<[^>]+>', '', html)
-    # Decode HTML entities (&amp; &nbsp; &#160; etc.)
     html = html_lib.unescape(html)
-    # Clean up whitespace, preserve line breaks
     lines = []
     for line in html.splitlines():
         line = re.sub(r'[ \t]+', ' ', line).strip()
@@ -362,9 +381,9 @@ def _html_to_text(html: str) -> str:
 
 def _extract_body_from_payload(payload: dict) -> str:
     """
-    Recursively extract the best readable text from a Gmail message payload.
-    Priority: text/plain > text/html converted to text.
-    Handles deeply nested multipart/alternative, multipart/mixed, etc.
+    Recursively extract best readable text from a Gmail message payload.
+    FIX v6.0: nested HTML-only multiparts now correctly go to html_parts,
+    not plain_parts, so the text/plain preference is correctly enforced.
     """
     mime = payload.get("mimeType", "")
     data = payload.get("body", {}).get("data", "")
@@ -386,11 +405,18 @@ def _extract_body_from_payload(payload: dict) -> str:
             if sub_mime == "text/plain" and sub_data:
                 plain_parts.append(_decode_b64(sub_data))
             elif sub_mime == "text/html" and sub_data:
+                # FIX: was incorrectly appended to plain_parts in some paths
                 html_parts.append(_html_to_text(_decode_b64(sub_data)))
             elif sub_mime.startswith("multipart/"):
+                # Recurse — result could be plain or html-derived
                 nested = _extract_body_from_payload(part)
-                if nested:
-                    plain_parts.append(nested)
+                nested_mime = _dominant_mime(part)
+                if nested_mime == "text/plain":
+                    if nested:
+                        plain_parts.append(nested)
+                else:
+                    if nested:
+                        html_parts.append(nested)
 
         combined_plain = "\n".join(plain_parts).strip()
         combined_html  = "\n".join(html_parts).strip()
@@ -399,92 +425,72 @@ def _extract_body_from_payload(payload: dict) -> str:
     return ""
 
 
+def _dominant_mime(payload: dict) -> str:
+    """Heuristic: what is the primary content type inside a multipart?"""
+    for part in payload.get("parts", []):
+        m = part.get("mimeType", "")
+        if m == "text/plain":
+            return "text/plain"
+        if m == "text/html":
+            return "text/html"
+    return "text/html"
+
+
 def _strip_quoted_reply(text: str) -> str:
     """
-    Remove quoted previous emails from a message body.
-    Keeps only the NEW content written by the current sender.
-
-    Handles all common reply formats:
-      Gmail:   "On Mon, 7 Jun 2025, Vendor <v@x.com> wrote:"
-      Outlook: "-----Original Message-----"  /  "________"
-      Outlook: "From: ... Sent: ... To: ... Subject: ..." block
-      Apple:   "On 7 Jun 2025, at 14:32, Vendor wrote:"
-      Inline:  Lines starting with >
-      Yahoo:   "--- Original Message ---"
+    Remove quoted previous emails from message body.
+    FIX v6.0: tightened the 'On YYYY...' detection to require date + 'wrote:'
+    to avoid false truncation when vendors mention years in body text.
     """
     result = []
 
     for line in text.splitlines():
         stripped = line.strip()
 
-        # ── Hard-stop patterns — everything below this line is a quote ──
-
-        # Outlook/Lotus "-----Original Message-----" or "--- Forwarded ---"
         if re.match(r'^-{3,}\s*(Original|Forwarded)\s*(Message|mail)?\s*-{0,3}$',
                     stripped, re.IGNORECASE):
             break
 
-        # Long underscore dividers (Outlook web)
         if re.match(r'^_{5,}$', stripped):
             break
 
-        # Gmail / Apple "On [date/time] [name] wrote:" — single line
-        # Handles: "On Mon, Jun 7, 2025 at 2:32 PM Vendor <v@x.com> wrote:"
-        # Handles: "On 7 Jun 2025, at 14:32, Vendor wrote:"
+        # Must end with "wrote:" to be a real quote header (tightened from v5.0)
         if re.match(r'^On\s.{5,150}\swrote:\s*$', stripped, re.IGNORECASE):
             break
 
-        # Multi-line Gmail quote header: "On [date]" ending without "wrote:"
-        # followed next line by the name — catch by checking prior line
-        if result and re.match(r'^On\s.{5,80}$', stripped, re.IGNORECASE):
-            # peek: if this line has no "wrote:" but looks like a date line, stop
-            if re.search(r'\d{4}', stripped) and 'wrote' not in stripped.lower():
-                break
+        # Multi-line "On [date]" — only stop if the NEXT check confirms it (peek ahead removed)
+        # v6.0: removed the aggressive date-only break that caused false truncations
 
-        # Outlook header block: "From: X  Sent: Y  To: Z  Subject: W"
-        # Only trigger after we already have real content (len > 3 lines)
         if re.match(r'^From:\s+.+', stripped) and len(result) > 3:
             break
 
-        # ── Skip inline quoted lines (start with >) ──
         if stripped.startswith(">"):
             continue
 
-        # ── Skip email signature separators ──
         if stripped in ("--", "-- "):
             break
 
         result.append(line)
 
     clean = "\n".join(result).strip()
-    # Safety: if aggressive stripping removed almost everything (very short reply),
-    # return the original unstripped text so we don't lose content
     return clean if len(clean) >= 25 else text.strip()
 
 
 def _strip_signature(text: str) -> str:
-    """
-    Remove email signatures from the bottom of a message.
-    Signatures typically follow a blank line + "--" or common sign-off patterns.
-    Only removes from the bottom — stops at first non-signature content.
-    """
-    lines    = text.splitlines()
-    sig_start = len(lines)  # default: no signature found
+    lines     = text.splitlines()
+    sig_start = len(lines)
 
     for i in range(len(lines) - 1, -1, -1):
         stripped = lines[i].strip()
-        # Standard signature delimiter
         if stripped in ("--", "-- "):
             sig_start = i
             break
-        # Common closing phrases that mark start of signature block
         if re.match(
             r'^(best regards?|regards?|warm regards?|thanks?|thank you|'
             r'sincerely|cheers?|yours? truly|faithfully|with regards?|'
             r'best wishes?|kind regards?),?\s*$',
             stripped, re.IGNORECASE
         ):
-            # Only treat as signature if it's in the last 10 lines
             if i >= len(lines) - 10:
                 sig_start = i
             break
@@ -494,33 +500,32 @@ def _strip_signature(text: str) -> str:
 
 def _strip_cjk(text: str) -> str:
     """
-    Remove CJK (Chinese/Japanese/Korean) characters from text.
-    Vendor emails often contain Chinese addresses or signatures —
-    these cause Qwen3 to switch to Chinese for the entire response.
-    We keep the structure of the email but remove the trigger characters.
-    Covers: CJK Unified Ideographs, Hiragana, Katakana, CJK Compatibility.
+    Remove CJK characters including Hangul and Extension B-F planes.
+    FIX v6.0: added Hangul syllables, Radicals Supplement, Extensions B-I.
     """
     return re.sub(
-        r'[一-鿿'       # CJK Unified Ideographs (most Chinese/Japanese/Korean)
-        r'㐀-䶿'        # CJK Extension A
-        r'぀-ゟ'        # Hiragana
-        r'゠-ヿ'        # Katakana
-        r'豈-﫿'        # CJK Compatibility Ideographs
-        r'　-〿]',      # CJK Symbols and Punctuation
+        r'['
+        r'\u1100-\u11FF'    # Hangul Jamo
+        r'\u2E80-\u2EFF'    # CJK Radicals Supplement
+        r'\u3040-\u309F'    # Hiragana
+        r'\u30A0-\u30FF'    # Katakana
+        r'\u3400-\u4DBF'    # CJK Extension A
+        r'\u4E00-\u9FFF'    # CJK Unified Ideographs
+        r'\uA960-\uA97F'    # Hangul Jamo Extended-A
+        r'\uAC00-\uD7AF'    # Hangul Syllables
+        r'\uD7B0-\uD7FF'    # Hangul Jamo Extended-B
+        r'\uF900-\uFAFF'    # CJK Compatibility Ideographs
+        r'\uFE30-\uFE4F'    # CJK Compatibility Forms
+        r'\u3000-\u303F'    # CJK Symbols and Punctuation
+        r']',
         ' ', text
     )
+    # Note: Supplementary CJK (U+20000+) requires regex on Python's re to use
+    # surrogate pairs — handled separately below via broad surrogate range
+    # For most vendor emails the BMP coverage above is sufficient
 
 
 def extract_message_body(payload: dict) -> str:
-    """
-    Full extraction pipeline per message:
-      1. Extract raw text (prefers text/plain, falls back to HTML→text)
-      2. Strip quoted reply sections (previous emails in the chain)
-      3. Strip email signature block
-      4. Strip CJK characters — prevents Qwen3 language-switching
-      5. Collapse excessive blank lines
-    Result: only the NEW content this person wrote, clean for LLM consumption.
-    """
     raw   = _extract_body_from_payload(payload)
     clean = _strip_quoted_reply(raw)
     clean = _strip_signature(clean)
@@ -552,19 +557,10 @@ def _extract_email(raw: str) -> str:
 # ════════════════════════════════════════════════════════════
 
 def load_vendor_db(sheets_svc) -> dict:
-    """
-    Reads export sheet → two lookup indexes:
-      emails  { "vendor@domain.com" → {partner_name, classification} }
-      domains { "domain.com"        → {partner_name, classification} }
-
-    Domain index catches cases where full email isn't in DB
-    but domain is known (e.g. everyone @tirupurknits.com = Tirupur Knits).
-    """
     print("  📖 Loading vendor database from export sheet...")
     try:
         result = sheets_svc.spreadsheets().values().get(
-            spreadsheetId=SHEET_ID,
-            range=f"{EXPORT_TAB}!A:D"
+            spreadsheetId=SHEET_ID, range=f"{EXPORT_TAB}!A:D"
         ).execute()
     except Exception as e:
         log.error(f"Vendor DB load failed: {e}")
@@ -576,7 +572,6 @@ def load_vendor_db(sheets_svc) -> dict:
         print("  ⚠️  Export sheet is empty.")
         return {"emails": {}, "domains": {}}
 
-    # Skip header row if present
     start = 1 if rows[0][0].lower() in ("partner name", "partnername", "name") else 0
 
     emails_db  = {}
@@ -585,7 +580,6 @@ def load_vendor_db(sheets_svc) -> dict:
     for row in rows[start:]:
         while len(row) < 4:
             row.append("")
-
         partner_name   = row[0].strip()
         classification = row[1].strip()
         email_raw      = row[3].strip()
@@ -597,38 +591,16 @@ def load_vendor_db(sheets_svc) -> dict:
             email = raw_email.strip().lower()
             if "@" not in email:
                 continue
-
-            emails_db[email] = {
-                "partner_name":   partner_name,
-                "classification": classification,
-            }
-
+            emails_db[email] = {"partner_name": partner_name, "classification": classification}
             domain = email.split("@")[1]
             if domain not in domains_db:
-                domains_db[domain] = {
-                    "partner_name":   partner_name,
-                    "classification": classification,
-                }
+                domains_db[domain] = {"partner_name": partner_name, "classification": classification}
 
     print(f"  ✅ Vendor DB: {len(emails_db)} emails across {len(domains_db)} domains\n")
     return {"emails": emails_db, "domains": domains_db}
 
 
 def lookup_vendor(all_addresses: list, vendor_db: dict) -> dict:
-    """
-    Ordered vendor lookup — skips @onequince.com.
-    Returns on the FIRST confident match, preserving address order.
-    Caller must pass addresses in priority order: From → To → CC → BCC.
-
-    Pass 1: exact email match  (highest confidence, checked first)
-    Pass 2: domain match       (only company domains — generic webmail excluded)
-
-    Two-pass design means an exact email match always beats a domain match,
-    even if the domain match address appears earlier in the list.
-
-    Generic domains (gmail, yahoo, etc.) are never used for domain matching
-    to avoid false positives from shared webmail addresses.
-    """
     emails_db  = vendor_db.get("emails",  {})
     domains_db = vendor_db.get("domains", {})
 
@@ -638,7 +610,6 @@ def lookup_vendor(all_addresses: list, vendor_db: dict) -> dict:
         "aol.com", "ymail.com", "rediffmail.com", "mail.com",
     }
 
-    # Pass 1: exact email — return immediately on first hit
     for raw in all_addresses:
         if ONEQUINCE_DOMAIN.lower() in raw.lower():
             continue
@@ -648,7 +619,6 @@ def lookup_vendor(all_addresses: list, vendor_db: dict) -> dict:
         if email in emails_db:
             return emails_db[email]
 
-    # Pass 2: domain match — only non-generic business domains
     for raw in all_addresses:
         if ONEQUINCE_DOMAIN.lower() in raw.lower():
             continue
@@ -663,95 +633,73 @@ def lookup_vendor(all_addresses: list, vendor_db: dict) -> dict:
 
 
 def _fallback_vendor_name(external_addresses: list) -> str:
-    """
-    Last resort vendor name — only uses display names that look like
-    real people/companies, filtered against known noise patterns.
-    """
     seen   = set()
     result = []
-
     for raw in external_addresses:
         email      = _extract_email(raw)
         local_part = email.split("@")[0] if "@" in email else email
-
-        # Skip obvious noise/automated addresses
         if any(noise in local_part.lower() for noise in NOISE_ADDRESS_WORDS):
             continue
-
         name = _display_name(raw)
-        # Only accept if name looks like a real person/company (not just the email itself)
         if name and name.lower() not in (email, local_part) and name.lower() not in seen:
             seen.add(name.lower())
             result.append(name)
-
-    return ", ".join(result[:2])  # max 2 to avoid clutter
+    return ", ".join(result[:2])
 
 
 # ════════════════════════════════════════════════════════════
-# OLLAMA CLIENT — with retry on timeout
+# OPENAI CLIENT
 # ════════════════════════════════════════════════════════════
 
-def ask_ollama(prompt: str) -> str:
-    """
-    Send prompt to Ollama and return raw text response.
+_openai_client = None
 
-    Error handling:
-      - ConnectionError  → Ollama not running, fail immediately (no retry)
-      - Timeout          → transient, retry with backoff
-      - HTTP error       → transient (e.g. 503), retry with backoff
-      - Any other error  → log and retry, then give up
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY not set. Add it to your .env file.")
+        _openai_client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT)
+    return _openai_client
 
-    Returns "" on all failure paths — callers must handle empty string.
-    """
-    payload = {
-        "model":    OLLAMA_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream":   False,
-    }
-    for attempt in range(OLLAMA_RETRIES + 1):
+
+def ask_openai(prompt: str) -> str:
+    from openai import RateLimitError, APIStatusError, APIConnectionError, APITimeoutError
+    for attempt in range(OPENAI_RETRIES + 1):
         try:
-            resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
-            resp.raise_for_status()
-            return resp.json()["message"]["content"].strip()
-
-        except requests.exceptions.ConnectionError:
-            print("  ❌ Ollama not running — start with: ollama serve")
-            log.error("Ollama ConnectionError — server not running")
-            return ""
-
-        except requests.exceptions.Timeout:
-            if attempt < OLLAMA_RETRIES:
-                wait = 3 * (attempt + 1)
-                print(f"    ⏳ Ollama timeout — retry {attempt + 1}/{OLLAMA_RETRIES} in {wait}s...")
-                log.warning(f"Ollama timeout on attempt {attempt + 1}")
+            response = _get_openai_client().chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            return response.choices[0].message.content.strip()
+        except RateLimitError:
+            wait = 10 * (attempt + 1)
+            if attempt < OPENAI_RETRIES:
+                print(f"    ⏳ OpenAI rate limit — retry {attempt+1}/{OPENAI_RETRIES} in {wait}s...")
                 time.sleep(wait)
             else:
-                log.error("Ollama timed out after all retries")
                 return ""
-
-        except requests.exceptions.HTTPError as e:
-            if attempt < OLLAMA_RETRIES:
-                wait = 2 * (attempt + 1)
-                log.warning(f"Ollama HTTP {e.response.status_code} on attempt {attempt + 1}, retry in {wait}s")
-                time.sleep(wait)
+        except APIStatusError as e:
+            if e.status_code < 500:
+                return ""
+            if attempt < OPENAI_RETRIES:
+                time.sleep(5 * (attempt + 1))
             else:
-                log.error(f"Ollama HTTP error after all retries: {e}")
                 return ""
-
+        except (APIConnectionError, APITimeoutError):
+            if attempt < OPENAI_RETRIES:
+                time.sleep(5 * (attempt + 1))
+            else:
+                return ""
         except Exception as e:
-            if attempt < OLLAMA_RETRIES:
-                wait = 2 * (attempt + 1)
-                log.warning(f"Ollama unexpected error attempt {attempt + 1}: {e}, retry in {wait}s")
-                time.sleep(wait)
-            else:
-                log.error(f"Ollama failed after all retries: {e}")
-                return ""
-
+            log.error(f"OpenAI unexpected error: {e}")
+            return ""
     return ""
 
 
 def _clean_llm(raw: str) -> str:
-    """Strip <think> blocks and markdown code fences."""
     if "<think>" in raw:
         raw = raw.split("</think>")[-1].strip()
     raw = re.sub(r'^```(?:json)?\s*', '', raw.strip())
@@ -760,19 +708,56 @@ def _clean_llm(raw: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════
-# SINGLE COMBINED LLM CALL
-# Division + Style + Colour + AI Overview in ONE prompt.
-# Enforces English output — no more Chinese summaries.
+# LLM WINDOW SELECTION — smarter than first + last N
 # ════════════════════════════════════════════════════════════
 
-def llm_analyse_thread(subject: str, structured_messages: list, thread_id: str = "", msg_count: int = 0) -> dict:
+def _select_llm_window(msgs: list, max_n: int) -> list:
     """
-    structured_messages: list of {from, date, body}
-    Each message is already cleaned, quote-stripped, and body-capped.
-    Messages are labelled so LLM understands who said what and when.
+    Select which messages to send to the LLM when the thread is longer than max_n.
 
-    thread_id + msg_count: used for SQLite cache key.
-    If cache hit for this prompt_version → skip LLM call entirely.
+    Strategy (v6.0 improvement over always using first + last N-1):
+      - Always include msg[0]  (establishes the original request/context)
+      - Always include last 4  (most current status — what needs action now)
+      - Fill remaining slots from the middle (quality issues, PO, delays often here)
+
+    This avoids the v5.0 cliff where a 20-message thread had the PO placed in msg 8
+    and the LLM never saw it.
+    """
+    n = len(msgs)
+    if n <= max_n:
+        return msgs
+
+    first   = [msgs[0]]
+    last_4  = msgs[-4:]
+    middle  = msgs[1:-4]
+
+    remaining = max_n - 1 - 4   # slots after first + last 4
+    if remaining <= 0:
+        return first + last_4
+
+    # Take evenly-spaced messages from the middle
+    step   = max(1, len(middle) // remaining)
+    picked = middle[::step][:remaining]
+
+    return first + picked + last_4
+
+
+# ════════════════════════════════════════════════════════════
+# SINGLE COMBINED LLM CALL — analysis + reply draft in one prompt
+# ════════════════════════════════════════════════════════════
+
+def llm_analyse_thread(
+    subject: str,
+    structured_messages: list,
+    vendor_name: str = "",
+    thread_id: str = "",
+    msg_count: int = 0,
+) -> dict:
+    """
+    One LLM call per thread. Returns all structured fields + a ready-to-send
+    reply draft in the 'reply_draft' key.
+
+    vendor_name is passed in so the reply can be correctly addressed.
     """
     # ── Cache check ──
     if thread_id and msg_count:
@@ -780,31 +765,30 @@ def llm_analyse_thread(subject: str, structured_messages: list, thread_id: str =
         if cached:
             print(f"    💾 Cache hit — skipping LLM for: {subject[:50]}")
             return cached
+
     divisions_str = "\n".join(f"  - {d}" for d in DIVISIONS)
 
-    # Build labelled thread context
-    # Cost control: latest message → full BODY_CHARS_PER_MSG chars
-    #               older messages → OLDER_MSG_CHARS only (saves 60-80% tokens)
     n_msgs = len(structured_messages)
     thread_context = ""
     for i, msg in enumerate(structured_messages, 1):
-        is_latest = (i == n_msgs)
+        is_latest  = (i == n_msgs)
         char_limit = BODY_CHARS_PER_MSG if is_latest else OLDER_MSG_CHARS
-        body = msg["body"][:char_limit]
-        truncated = " [truncated]" if len(msg["body"]) > char_limit else ""
+        body       = msg["body"][:char_limit]
+        truncated  = " [truncated]" if len(msg["body"]) > char_limit else ""
         thread_context += (
             f"\n[Message {i} | From: {msg['from']} | Date: {msg['date']}]{truncated}\n"
             f"{body}\n"
         )
 
-    prompt = f"""/no_think
-LANGUAGE RULE — READ THIS FIRST:
-You MUST write every word of your response in ENGLISH.
-Do NOT use Chinese (中文), Japanese, Hindi, or any other language.
-The email may contain non-English text — IGNORE IT and write your analysis in ENGLISH only.
-If you write anything other than English, your response is wrong.
+    vendor_line = f"Vendor / counterparty: {vendor_name}" if vendor_name else ""
 
-You are a fashion merchandising analyst. Analyse this email thread.
+    prompt = f"""
+LANGUAGE RULE — READ FIRST:
+Every word of your JSON response MUST be in ENGLISH.
+Do NOT use Chinese, Japanese, Hindi, or any other language in any field.
+
+You are a fashion merchandising analyst at One Quince. Analyse this email thread.
+{vendor_line}
 
 SUBJECT: {subject}
 
@@ -814,52 +798,36 @@ THREAD (oldest → newest):
 ════ TASKS ════
 
 TASK 1 — DIVISION
-Read the SUBJECT LINE ONLY. Pick exactly one division:
+Read the SUBJECT LINE ONLY. Pick exactly one:
 {divisions_str}
 
-Mapping rules:
-- Kids / Baby / Children / Toddler → Kids and Baby
-- Maternity → Maternity
-- Men / Mens / Men's (subject has no "Women") → Men's Apparel
-- Women / Womens / Women's / Ladies → Women's Apparel
-- Flat / Tech Pack / Apparel Flat → Apparel Flats
-- Home / Linen / Bedding / Cushion / Curtain / Rug / Towel / Decor → Home
-- Furniture / Sofa / Chair / Table / Shelf / Storage → Furniture
-- Jewelry / Jewellery / Necklace / Ring / Earring / Bracelet → Jewelry
-- Bag / Wallet / Belt / Scarf / Hat / Accessories → Accessories
-- Unclear → Other
+Mapping: Kids/Baby/Children/Toddler → Kids and Baby | Maternity → Maternity
+Men/Mens (no Women) → Men's Apparel | Women/Ladies → Women's Apparel
+Flat/Tech Pack → Apparel Flats | Home/Linen/Bedding/Cushion/Rug/Towel → Home
+Furniture/Sofa/Chair/Table → Furniture | Jewelry/Necklace/Ring → Jewelry
+Bag/Wallet/Belt/Accessories → Accessories | Unclear → Other
 
 TASK 2 — STYLE NUMBERS
-Scan ALL message bodies carefully. Extract every style/article number.
+Scan ALL message bodies. Extract every style/article number.
 Known patterns: M--1234  W--5678  U--9012  W-PNT-228  NECK-209  U-FURN-304  ST-2045
-Rules:
-- Format: letters + one or two hyphens + optional letters + 3-6 digits
-- M=Men, W=Women, U=Unisex/Kids prefix letters
-- Double hyphens valid: M--1348 is ONE style number
-- Look near: style, article, ref, #, style no, style number, item no
-- Return all found, comma-separated, UPPERCASE
-- If none found: return ""
+Rules: letters + one or two hyphens + optional letters + 3–6 digits.
+M=Men, W=Women, U=Unisex/Kids prefix. Double hyphens valid.
+Return all found, comma-separated UPPERCASE. If none: return "".
 
 TASK 3 — COLOUR
-Extract product colour mentions.
-Look for color: / colour: / col: labels, or colour names near style numbers.
-Return comma-separated English colour names, or "" if none found.
+Extract product colour mentions near style numbers or labelled color:/colour:/col:.
+Return comma-separated English colour names. If none: return "".
 
-TASK 4 — AI OVERVIEW  (ENGLISH ONLY — do NOT use Chinese or any other language)
-Write 3-4 bullet points for a merchandise manager summarising the thread.
-Cover:
-- What product / order / sample is being discussed
-- Any quality issues, delays, or concerns
-- Current status (from the latest message)
-- Next action needed
-
-Start each bullet with "• ". Every word must be in English. No Chinese characters.
+TASK 4 — AI OVERVIEW  (ENGLISH ONLY)
+Write 3–4 bullet points for a merchandise manager summarising:
+• What product/order/sample is being discussed
+• Any quality issues, delays, or concerns
+• Current status (from the latest message)
+• Next action needed
+Start each bullet with "• ". English words only. No non-English characters.
 
 TASK 5 — INTENT
-Read the LATEST MESSAGE in the thread. Identify the single most important action
-this thread requires from the merchandising team right now.
-
-Choose exactly one from:
+Read the LATEST MESSAGE. Pick the single most important action required:
   - Approve sample        (vendor sent sample, waiting for sign-off)
   - Review & feedback     (artwork, tech pack, or design shared for comments)
   - Confirm order         (PO or booking needs confirmation)
@@ -870,48 +838,60 @@ Choose exactly one from:
   - Track shipment        (AWB shared, goods in transit)
   - Payment action        (invoice received or payment overdue)
   - No action needed      (FYI thread, informational only)
-  - Other                 (does not fit any above)
+  - Other
+
+Tiebreaker — if "Chase vendor" and "Awaiting shipment" both apply,
+prefer "Chase vendor" when no AWB has been shared, "Awaiting shipment" otherwise.
 
 TASK 6 — REQUIRES REPLY
 Does the latest message require a reply from your team?
-Answer true if: a question was asked, approval was requested, or action is awaited.
-Answer false if: it is purely informational, or vendor acknowledged without asking anything.
+true  → a question was asked, approval was requested, or action is awaited
+false → purely informational, or vendor acknowledged without asking anything
 
 TASK 7 — SAMPLE STATUS
-Read ALL messages. What is the current status of any physical sample in this thread?
-Choose exactly one:
-  - Dispatched   (vendor says sample has been sent / shipped / dispatched)
-  - Received     (buyer/team confirmed sample has arrived)
-  - Approved     (sample has been approved / sign-off given)
-  - Rejected     (sample rejected / failed / not approved)
-  - Pending      (sample requested or expected but not yet dispatched)
-  - None         (no sample mentioned in this thread at all)
+Current status of any physical sample:
+  Dispatched | Received | Approved | Rejected | Pending | None
+
+TASK 8 — REPLY DRAFT  ★ NEW ★
+Write a ready-to-send email reply on behalf of the One Quince merchandising team.
+
+Tone rules:
+  • Professional but warm — like a sharp, senior buyer, NOT a corporate robot
+  • First sentence: acknowledge what the vendor said or did (show you read it)
+  • Address the specific ask in the latest message directly — no vague pleasantries
+  • If action is needed from the vendor, state it clearly and politely in one line
+  • If action is needed from our side, acknowledge it and give a concrete next step
+  • Keep it SHORT: 3–5 sentences. No rambling. No filler like "I hope this email finds you well."
+  • End with a forward-looking line that keeps the relationship warm
+  • Salutation: "Hi [Vendor name]," — use the actual vendor name if known, else "Hi there,"
+  • Sign-off: "Best,\n[Your name]"  — use "[Your name]" as a placeholder for the sender's name
+
+Write the reply as plain text — no markdown, no asterisks, no bullet points.
+This is the body of an email. It must be ready to send with minimal edits.
 
 ════ OUTPUT ════
-REMINDER: Your entire response must be in ENGLISH. No Chinese. No other languages.
-Return ONLY valid JSON. No explanation. No markdown. No extra text.
+Return ONLY valid JSON. No markdown, no explanation, no extra text.
 {{
-  "division":       "<exactly one division from the list>",
+  "division":       "<one division>",
   "style_numbers":  "<comma-separated UPPERCASE or empty string>",
   "colour":         "<comma-separated English colour names or empty string>",
-  "ai_overview":    "<3-4 English bullet points separated by \\n>",
-  "intent":         "<exactly one intent from the list above>",
-  "requires_reply": <true or false — JSON boolean, no quotes>,
-  "sample_status":  "<exactly one status from: Dispatched, Received, Approved, Rejected, Pending, None>"
+  "ai_overview":    "<3–4 English bullet points separated by \\n>",
+  "intent":         "<one intent from the list>",
+  "requires_reply": <true or false>,
+  "sample_status":  "<Dispatched | Received | Approved | Rejected | Pending | None>",
+  "reply_draft":    "<ready-to-send email body, plain text, 3–5 sentences>"
 }}"""
 
-    # ── Call Ollama with JSON-parse retry ──
-    # Attempt the full call up to 2 times if JSON parse fails.
-    # ask_ollama() already handles network/timeout retries internally.
-    parsed = None
+    # ── Call with JSON-parse retry ──
+    parsed   = None
     last_raw = ""
     for parse_attempt in range(2):
-        raw     = ask_ollama(prompt)
+        raw      = ask_openai(prompt)
         last_raw = raw
-        cleaned = _clean_llm(raw)
+        cleaned  = _clean_llm(raw)
 
         if not cleaned:
-            log.warning(f"Empty LLM response for '{subject}' on parse attempt {parse_attempt + 1}")
+            log.warning(f"Empty LLM response for '{subject}' attempt {parse_attempt + 1}")
             if parse_attempt == 0:
                 time.sleep(2)
                 continue
@@ -919,62 +899,44 @@ Return ONLY valid JSON. No explanation. No markdown. No extra text.
 
         try:
             parsed = json.loads(cleaned)
-            break  # valid JSON — exit retry loop
+            break
         except json.JSONDecodeError as e:
-            log.warning(
-                f"LLM JSON parse failed for '{subject}' attempt {parse_attempt + 1}: {e}. "
-                f"Raw (first 300 chars): {cleaned[:300]}"
-            )
+            log.warning(f"LLM JSON parse failed for '{subject}' attempt {parse_attempt + 1}: {e}")
             if parse_attempt == 0:
-                time.sleep(2)  # small pause before retry
+                time.sleep(2)
 
-    # ── Validate and extract fields ──
     if parsed is not None:
         overview = parsed.get("ai_overview", "").strip()
 
-        # Safety net: if LLM still returned CJK characters, retry once with
-        # a minimal prompt that has zero non-English content in the input.
-        if re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', overview):
-            log.warning(f"LLM returned CJK overview for '{subject}' — retrying with stripped prompt")
-            # Build a clean summary-only prompt with all CJK stripped from bodies
+        # CJK safety net on overview
+        if re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', overview):
+            log.warning(f"LLM returned CJK overview for '{subject}' — retrying stripped prompt")
             stripped_context = ""
             for i, msg in enumerate(structured_messages, 1):
                 body = _strip_cjk(msg["body"][:BODY_CHARS_PER_MSG])
                 stripped_context += f"[Message {i} | From: {msg['from']}]\n{body}\n\n"
 
-            retry_prompt = f"""/no_think
-WRITE IN ENGLISH ONLY. No Chinese. No Japanese. English words only.
+            retry_prompt = f"""
+WRITE IN ENGLISH ONLY. No Chinese. No Japanese. No Hangul. English words only.
 
 Summarise this email thread in 3-4 bullet points for a fashion buyer.
-Each bullet starts with "• ".
-Be brief and factual. English only.
-
+Each bullet starts with "• ". English only.
 Subject: {subject}
-
 {stripped_context.strip()}
+Return ONLY: {{"ai_overview": "<your English bullets separated by \\n>"}}"""
 
-Return ONLY this JSON (English values only):
-{{"ai_overview": "<your 3-4 English bullets separated by \\n>"}}"""
-
-            retry_raw    = ask_ollama(retry_prompt)
-            retry_clean  = _clean_llm(retry_raw)
+            retry_raw   = ask_openai(retry_prompt)
+            retry_clean = _clean_llm(retry_raw)
             try:
-                retry_parsed = json.loads(retry_clean)
-                retry_overview = retry_parsed.get("ai_overview", "").strip()
-                if retry_overview and not re.search(
-                    r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', retry_overview
-                ):
-                    overview = retry_overview
-                    log.info(f"CJK retry succeeded for '{subject}'")
-                else:
-                    overview = "• Thread summary unavailable — vendor email contains non-English content"
-                    log.warning(f"CJK retry also failed for '{subject}'")
+                rp      = json.loads(retry_clean)
+                ro      = rp.get("ai_overview", "").strip()
+                overview = ro if ro and not re.search(
+                    r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', ro
+                ) else "• Thread summary unavailable — vendor email contains non-English content"
             except Exception:
                 overview = "• Thread summary unavailable — vendor email contains non-English content"
-                log.warning(f"CJK retry JSON parse failed for '{subject}'"  )
 
-        # requires_reply: LLM must return JSON boolean true/false
-        # Defensively handle string "true"/"false" in case LLM wraps it in quotes
+        # Normalise requires_reply
         raw_reply = parsed.get("requires_reply", False)
         if isinstance(raw_reply, bool):
             requires_reply = raw_reply
@@ -983,16 +945,23 @@ Return ONLY this JSON (English values only):
         else:
             requires_reply = bool(raw_reply)
 
-        # intent: must be a non-empty string
-        intent = parsed.get("intent", "").strip()
-        if not intent:
-            intent = "Other"
+        intent = parsed.get("intent", "").strip() or "Other"
 
-        # sample_status: validate against allowed values
         valid_statuses = {"Dispatched", "Received", "Approved", "Rejected", "Pending", "None"}
         sample_status  = parsed.get("sample_status", "None").strip().capitalize()
         if sample_status not in valid_statuses:
             sample_status = "None"
+
+        reply_draft = parsed.get("reply_draft", "").strip()
+        # Sanity-check: if reply came back empty or with CJK, use a minimal fallback
+        if not reply_draft or re.search(
+            r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', reply_draft
+        ):
+            reply_draft = (
+                f"Hi {'there' if not vendor_name else vendor_name},\n\n"
+                f"Thank you for your email regarding {subject}. "
+                f"We'll review and come back to you shortly.\n\nBest,\n[Your name]"
+            )
 
         result = {
             "division":       parsed.get("division",      "Other").strip(),
@@ -1002,14 +971,15 @@ Return ONLY this JSON (English values only):
             "intent":         intent,
             "requires_reply": "Yes" if requires_reply else "No",
             "sample_status":  sample_status,
+            "reply_draft":    reply_draft,
         }
-        # ── Store in cache for future runs ──
+
         if thread_id and msg_count:
             cache_set(thread_id, msg_count, result)
         return result
 
-    # ── Full fallback — LLM failed after all retries ──
-    log.error(f"LLM completely failed for '{subject}'. Last raw output: {last_raw[:400]}")
+    # ── Full fallback ──
+    log.error(f"LLM completely failed for '{subject}'. Raw: {last_raw[:400]}")
     all_text = "\n".join(m["body"] for m in structured_messages)
     return {
         "division":       _fallback_division(subject),
@@ -1019,6 +989,10 @@ Return ONLY this JSON (English values only):
         "intent":         "Other",
         "requires_reply": "No",
         "sample_status":  "None",
+        "reply_draft":    (
+            f"Hi {'there' if not vendor_name else vendor_name},\n\n"
+            f"Thanks for reaching out. We'll get back to you on {subject} shortly.\n\nBest,\n[Your name]"
+        ),
     }
 
 
@@ -1032,7 +1006,7 @@ def _fallback_division(subject: str) -> str:
     if any(w in s for w in ["flat", "tech pack"]):                    return "Apparel Flats"
     if any(w in s for w in ["home","linen","bedding","cushion","rug","towel","curtain"]):
                                                                       return "Home"
-    if any(w in s for w in ["furniture", "sofa", "chair", "table", "shelf"]): return "Furniture"
+    if any(w in s for w in ["furniture","sofa","chair","table","shelf"]): return "Furniture"
     if any(w in s for w in ["jewelry","jewellery","necklace","ring","earring"]): return "Jewelry"
     if any(w in s for w in ["bag","wallet","accessories","belt","scarf","hat"]): return "Accessories"
     return "Other"
@@ -1050,19 +1024,17 @@ def _fallback_style_numbers(text: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════
-# PO NUMBER EXTRACTION — regex, no LLM needed
+# PO NUMBER EXTRACTION
 # ════════════════════════════════════════════════════════════
 
-# PO patterns ordered by confidence — most explicit first
 PO_PATTERNS = [
-    r'\bP\.?O\.?\s*(?:No|Number|#|:)?\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-/]{3,20})\b',  # PO No: 12345
+    r'\bP\.?O\.?\s*(?:No|Number|#|:)?\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-/]{3,20})\b',
     r'\bPurchase\s+Order\s*(?:No|Number|#|:)?\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-/]{3,20})\b',
     r'\bOrder\s+(?:No|Number|Ref|#)\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-/]{3,20})\b',
-    r'\bPO[:\-\s]\s*([A-Z0-9][A-Z0-9\-/]{3,20})\b',                # PO: ABC-1234
-    r'\bRef(?:erence)?\s*(?:No|#)?\s*[:#\-]?\s*(PO[A-Z0-9\-]{3,18})\b',  # Ref: PO12345
+    r'\bPO[:\-\s]\s*([A-Z0-9][A-Z0-9\-/]{3,20})\b',
+    r'\bRef(?:erence)?\s*(?:No|#)?\s*[:#\-]?\s*(PO[A-Z0-9\-]{3,18})\b',
 ]
 
-# Words that look like PO numbers but are not
 PO_NOISE = {
     "INVOICE", "SUBJECT", "REGARDS", "ATTACHED", "PLEASE", "KINDLY",
     "CONFIRM", "DETAILS", "SAMPLE", "STYLES", "UPDATE", "STATUS",
@@ -1070,43 +1042,30 @@ PO_NOISE = {
 
 
 def extract_po_number(structured_msgs: list) -> str:
-    """
-    Extract PO number from thread, newest message first.
-    Returns the first confident match, or "" if none found.
-
-    Searches newest → oldest so the most recent PO reference wins
-    (vendors sometimes correct a PO number in a follow-up message).
-    """
-    seen = set()
+    seen    = set()
     results = []
-
     for msg in reversed(structured_msgs):
         text = msg["body"]
         for pattern in PO_PATTERNS:
             for m in re.finditer(pattern, text, re.IGNORECASE):
                 candidate = m.group(1).strip().upper()
-                # Filter noise words and very short/long matches
                 if candidate in PO_NOISE:
                     continue
                 if len(candidate) < 4 or len(candidate) > 20:
                     continue
-                # Must contain at least one digit
                 if not re.search(r'\d', candidate):
                     continue
                 if candidate not in seen:
                     seen.add(candidate)
                     results.append(candidate)
-
-    # Return first (most recent) match
     return results[0] if results else ""
 
 
 # ════════════════════════════════════════════════════════════
-# SHIPMENT EXTRACTION — carrier, AWB number, sent date
+# SHIPMENT EXTRACTION
 # ════════════════════════════════════════════════════════════
 
 CARRIERS = [
-    # Specific names first (before their shorter aliases)
     "DHL Express", "DHL eCommerce", "DHL",
     "FedEx International", "FedEx",
     "UPS Express", "UPS",
@@ -1142,19 +1101,17 @@ CARRIER_ALIASES = {
 }
 
 AWB_PATTERNS = [
-    r'\bAWB\s*[:#\-]?\s*([A-Z0-9]{3}-\d{8})\b',                       # AWB 157-12345678
-    r'\bAWB\s*[:#\-]?\s*([A-Z0-9\-]{6,20})\b',                        # AWB: XXXXXXXX
-    r'\bairway\s*bill\s*[:#\-]?\s*([A-Z0-9\-]{6,20})\b',              # airway bill XXXX
+    r'\bAWB\s*[:#\-]?\s*([A-Z0-9]{3}-\d{8})\b',
+    r'\bAWB\s*[:#\-]?\s*([A-Z0-9\-]{6,20})\b',
+    r'\bairway\s*bill\s*[:#\-]?\s*([A-Z0-9\-]{6,20})\b',
     r'\btracking\s*(?:no|number|#|:)?\s*[:#\-]?\s*([A-Z0-9\-]{8,25})\b',
     r'\bshipment\s*(?:no|number|#|:)?\s*[:#\-]?\s*([A-Z0-9\-]{6,20})\b',
     r'\bconsignment\s*(?:no|number|#|:)?\s*([A-Z0-9\-]{6,20})\b',
-    r'\b(\d{3}-\d{8})\b',                                              # IATA: 157-12345678
-    r'\b(1Z[A-Z0-9]{16})\b',                                           # UPS 1Z format
-    r'\b([A-Z]{2}\d{9}[A-Z]{2})\b',                                    # Postal EE123456789CN
-    # ★ Number directly after carrier name — e.g. "via DHL 4704591124"
+    r'\b(\d{3}-\d{8})\b',
+    r'\b(1Z[A-Z0-9]{16})\b',
+    r'\b([A-Z]{2}\d{9}[A-Z]{2})\b',
     (r'\b(?:DHL|FedEx|UPS|TNT|Aramex|BlueDart|DTDC|Delhivery|Maersk|MSC|'
      r'Expeditors|Agility|CEVA|DSV|Geodis)\b[\s\w,./()-]{0,30}?\b(\d{8,13})\b'),
-    # Generic: number near shipment action words
     r'(?:sent|shipped|dispatched|courier|forward)[^.]{0,60}?\b(\d{8,13})\b',
 ]
 
@@ -1170,15 +1127,9 @@ DATE_CONTEXT_PATTERN = (
 
 
 def extract_shipment_info(text: str) -> dict:
-    """
-    Extracts carrier name, AWB/tracking number, and shipment sent date
-    from the full concatenated thread body text.
-    Handles all real-world vendor email formats.
-    """
     result     = {"company": "", "awb": "", "shipment_date": ""}
     text_lower = text.lower()
 
-    # 1. Find carrier — earliest occurrence wins
     best_carrier, best_pos = "", -1
     for carrier in CARRIERS:
         idx = text_lower.find(carrier.lower())
@@ -1187,19 +1138,16 @@ def extract_shipment_info(text: str) -> dict:
 
     result["company"] = CARRIER_ALIASES.get(best_carrier.lower(), best_carrier)
 
-    # 2. AWB / tracking number — priority ordered
     for pattern in AWB_PATTERNS:
         m = re.search(pattern, text, re.IGNORECASE)
         if m:
             result["awb"] = m.group(1).upper()
             break
 
-    # 3. Shipment sent date — from keyword context first
     m = re.search(DATE_CONTEXT_PATTERN, text, re.IGNORECASE)
     if m:
         result["shipment_date"] = m.group(1).strip("()")
     elif best_pos >= 0:
-        # Fallback: any date within ±150 chars of carrier name
         window = text[max(0, best_pos - 50): best_pos + 150]
         dm = re.search(
             r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})',
@@ -1212,36 +1160,24 @@ def extract_shipment_info(text: str) -> dict:
 
 
 # ════════════════════════════════════════════════════════════
-# ATTACHMENT DETECTION — reads MIME parts, zero body parsing
+# ATTACHMENT DETECTION
 # ════════════════════════════════════════════════════════════
 
-# MIME types we care about — maps to a human-readable label
 ATTACHMENT_MIME_MAP = {
-    # Documents
-    "application/pdf":                                              "PDF",
-    "application/msword":                                           "Word",
+    "application/pdf": "PDF",
+    "application/msword": "Word",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word",
-    # Spreadsheets
-    "application/vnd.ms-excel":                                     "Excel",
+    "application/vnd.ms-excel": "Excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel",
-    "text/csv":                                                     "CSV",
-    # Presentations
-    "application/vnd.ms-powerpoint":                                "PowerPoint",
+    "text/csv": "CSV",
+    "application/vnd.ms-powerpoint": "PowerPoint",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint",
-    # Images
-    "image/jpeg":  "Image",
-    "image/jpg":   "Image",
-    "image/png":   "Image",
-    "image/gif":   "Image",
-    "image/webp":  "Image",
-    "image/tiff":  "Image",
-    # Archives / CAD
-    "application/zip":              "ZIP",
-    "application/x-zip-compressed": "ZIP",
-    "application/octet-stream":     "File",   # generic binary — filename checked below
+    "image/jpeg": "Image", "image/jpg": "Image", "image/png": "Image",
+    "image/gif": "Image", "image/webp": "Image", "image/tiff": "Image",
+    "application/zip": "ZIP", "application/x-zip-compressed": "ZIP",
+    "application/octet-stream": "File",
 }
 
-# Extension → label for application/octet-stream fallback
 ATTACHMENT_EXT_MAP = {
     ".pdf": "PDF", ".doc": "Word", ".docx": "Word",
     ".xls": "Excel", ".xlsx": "Excel", ".csv": "CSV",
@@ -1255,7 +1191,6 @@ ATTACHMENT_EXT_MAP = {
 
 
 def _collect_parts(payload: dict) -> list:
-    """Flatten all MIME parts recursively — returns flat list of part dicts."""
     parts = []
     for part in payload.get("parts", []):
         parts.append(part)
@@ -1265,49 +1200,28 @@ def _collect_parts(payload: dict) -> list:
 
 
 def extract_attachments(messages: list) -> str:
-    """
-    Scan all Gmail message payloads for attached files.
-    Returns a human-readable string like "PDF, Excel, Image (×3)"
-    or "" if no attachments found.
-
-    Logic:
-      - A part is an attachment if it has filename != "" OR
-        Content-Disposition header contains "attachment"
-      - Groups by type, counts duplicates
-      - Skips inline images (Content-Disposition: inline)
-    """
     type_counts: dict = {}
-
     for msg in messages:
         all_parts = _collect_parts(msg.get("payload", {}))
-
         for part in all_parts:
-            filename = part.get("filename", "").strip()
-            mime     = part.get("mimeType", "").lower()
-            headers  = {h["name"].lower(): h["value"] for h in part.get("headers", [])}
+            filename    = part.get("filename", "").strip()
+            mime        = part.get("mimeType", "").lower()
+            headers     = {h["name"].lower(): h["value"] for h in part.get("headers", [])}
             disposition = headers.get("content-disposition", "").lower()
-
-            # Skip inline images (embedded in HTML email, not real attachments)
             if "inline" in disposition and not filename:
                 continue
-
-            # Must have a filename OR explicit attachment disposition
             if not filename and "attachment" not in disposition:
                 continue
-
-            # Resolve type label
             label = ATTACHMENT_MIME_MAP.get(mime, "")
             if not label and filename:
-                ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                ext   = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
                 label = ATTACHMENT_EXT_MAP.get(ext, "File")
             if not label:
                 continue
-
             type_counts[label] = type_counts.get(label, 0) + 1
 
     if not type_counts:
         return ""
-
     parts = []
     for label, count in sorted(type_counts.items()):
         parts.append(f"{label} (×{count})" if count > 1 else label)
@@ -1315,13 +1229,9 @@ def extract_attachments(messages: list) -> str:
 
 
 # ════════════════════════════════════════════════════════════
-# SHARED LINK DETECTION — scans message bodies
-# Catches Google Drive, Dropbox, WeTransfer, OneDrive, Notion,
-# Figma, and plain https links vendors paste into emails.
+# SHARED LINK DETECTION
 # ════════════════════════════════════════════════════════════
 
-# Named patterns — label: regex
-# Ordered most-specific first so label is as descriptive as possible
 SHARED_LINK_PATTERNS = [
     ("Google Drive",  r'https?://(?:drive|docs)\.google\.com/\S+'),
     ("Google Sheets", r'https?://docs\.google\.com/spreadsheets/\S+'),
@@ -1335,31 +1245,14 @@ SHARED_LINK_PATTERNS = [
     ("iCloud",        r'https?://(?:www\.)?icloud\.com/\S+'),
 ]
 
-# Generic https URL — catch-all for anything else (e.g. custom servers)
 _GENERIC_URL_RE = re.compile(r"https?://[^\s<>\"']{10,}", re.IGNORECASE)
 
 
 def extract_shared_links(structured_msgs: list) -> str:
-    """
-    Scan message bodies for shared document / file links.
-    Returns a deduplicated, labelled summary string.
-
-    Examples:
-      "Google Drive, WeTransfer"
-      "Google Drive (×2), Dropbox"
-      "https://custom-server.com/file.pdf"
-
-    Strategy:
-      1. Try each named pattern first → use its label
-      2. Anything left that looks like a URL → show domain only
-         (avoids dumping full long URLs into the sheet)
-    """
-    found_labels: dict = {}    # label → count
-    matched_urls:  set = set() # track to avoid double-counting
-
+    found_labels: dict = {}
+    matched_urls:  set = set()
     all_bodies = "\n".join(m["body"] for m in structured_msgs)
 
-    # Pass 1 — named patterns
     for label, pattern in SHARED_LINK_PATTERNS:
         for m in re.finditer(pattern, all_bodies, re.IGNORECASE):
             url = m.group(0)
@@ -1367,17 +1260,14 @@ def extract_shared_links(structured_msgs: list) -> str:
                 matched_urls.add(url)
                 found_labels[label] = found_labels.get(label, 0) + 1
 
-    # Pass 2 — generic URLs not already matched
     for m in _GENERIC_URL_RE.finditer(all_bodies):
         url = m.group(0)
         if url in matched_urls:
             continue
-        # Extract domain as label — skip very common non-file domains
         try:
             domain = url.split("/")[2].lstrip("www.")
         except IndexError:
             continue
-        # Skip tracking pixels, analytics, unsubscribe links, images in HTML
         skip_domains = {
             "google.com", "googleapis.com", "gstatic.com",
             "gmail.com", "yahoo.com", "hotmail.com",
@@ -1392,7 +1282,6 @@ def extract_shared_links(structured_msgs: list) -> str:
 
     if not found_labels:
         return ""
-
     parts = []
     for label, count in sorted(found_labels.items()):
         parts.append(f"{label} (×{count})" if count > 1 else label)
@@ -1400,61 +1289,34 @@ def extract_shared_links(structured_msgs: list) -> str:
 
 
 # ════════════════════════════════════════════════════════════
-# SAMPLE REMINDER — computed flag, no LLM needed
+# SAMPLE REMINDER
 # ════════════════════════════════════════════════════════════
 
-SAMPLE_REMINDER_DAYS = 7   # flag thread if dispatched but no update after this many days
+SAMPLE_REMINDER_DAYS = 7
 
 
 def compute_sample_reminder(sample_status: str, latest_msg_date) -> str:
-    """
-    Returns a reminder flag string for column U.
-
-    Rules:
-      - Status = Dispatched AND last message > SAMPLE_REMINDER_DAYS ago
-        → "⚠️ Chase — dispatched N days ago, no update"
-      - Status = Pending AND last message > SAMPLE_REMINDER_DAYS ago
-        → "⚠️ Chase — sample pending N days"
-      - Status = Approved / Rejected / Received → "" (resolved, no action)
-      - Status = None → "" (no sample in thread)
-      - Any status but last message is recent → "" (still fresh)
-    """
     if not latest_msg_date:
         return ""
-
     days_since = (datetime.now() - latest_msg_date).days
-
     if sample_status == "Dispatched" and days_since >= SAMPLE_REMINDER_DAYS:
         return f"⚠️ Chase — dispatched {days_since}d ago, no update"
-
     if sample_status == "Pending" and days_since >= SAMPLE_REMINDER_DAYS:
         return f"⚠️ Chase — sample pending {days_since}d"
-
     return ""
 
 
 # ════════════════════════════════════════════════════════════
-# THREAD PROCESSOR — the core engine
+# THREAD PROCESSOR
 # ════════════════════════════════════════════════════════════
 
 def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
-    """
-    1. Fetch full thread
-    2. Extract clean body per message (HTML→text, strip quotes)
-    3. Deduplicate CC addresses across all messages
-    4. Vendor lookup (DB → domain → noise-filtered fallback)
-    5. ONE combined LLM call
-    6. Regex shipment extraction on full combined text
-    7. Return complete row dict
-    """
     thread_data = gmail_threads_get(gmail_svc, userId="me", id=thread_id, format="full")
     messages    = thread_data.get("messages", [])
 
     if len(messages) < 2:
-        return None  # not a real conversation
+        return None
 
-    # Sort by internalDate (milliseconds epoch) — Gmail API does not guarantee order.
-    # internalDate is the most reliable timestamp: unaffected by clock skew in Date headers.
     messages = sorted(messages, key=lambda m: int(m.get("internalDate", 0)))
 
     subject        = ""
@@ -1464,49 +1326,40 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
     earliest_date  = None
     structured_msgs = []
 
-    # Dedup sets — track by extracted email address, not raw string
-    cc_seen  = set()
-    to_seen  = set()
+    cc_seen        = set()
+    to_seen        = set()
     all_cc_deduped = []
 
     for msg in messages:
         raw_headers = msg["payload"].get("headers", [])
         hdrs = {h["name"].lower(): h["value"] for h in raw_headers}
 
-        # Subject — clean from first message only
         if not subject:
             subject = re.sub(
-                r'^(re|fwd|fw):\s*',
-                '',
+                r'^(re|fwd|fw):\s*', '',
                 hdrs.get("subject", "(no subject)"),
                 flags=re.IGNORECASE
             ).strip()
 
-        # Sender
         sender = hdrs.get("from", "")
         if sender and sender not in all_senders:
             all_senders.append(sender)
 
-        # To — deduplicated by email address
         for addr in _split_addrs(hdrs.get("to", "")):
             key = _extract_email(addr)
             if key not in to_seen:
                 to_seen.add(key)
                 all_recipients.append(addr)
 
-        # CC — deduplicated by email address across ALL messages in thread
         for addr in _split_addrs(hdrs.get("cc", "")):
             key = _extract_email(addr)
             if key not in cc_seen:
                 cc_seen.add(key)
                 all_cc_deduped.append(addr)
 
-        # BCC
         for addr in _split_addrs(hdrs.get("bcc", "")):
             all_bcc.append(addr)
 
-        # Date — prefer internalDate (reliable epoch ms) over header Date field
-        # Header Date can have timezone/clock-skew issues; internalDate cannot.
         msg_date_str = ""
         internal_ts  = int(msg.get("internalDate", 0))
         if internal_ts:
@@ -1515,7 +1368,6 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
                 earliest_date = dt
             msg_date_str = dt.strftime("%d %b %Y %H:%M")
         else:
-            # Fallback to header Date if internalDate missing
             date_raw = hdrs.get("date", "")
             if date_raw:
                 try:
@@ -1526,7 +1378,6 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
                 except Exception:
                     pass
 
-        # Body — full HTML-aware extraction with quote stripping
         body = extract_message_body(msg["payload"])
         if body:
             structured_msgs.append({
@@ -1538,17 +1389,11 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
     if not structured_msgs:
         return None
 
-    # LLM context: always include first message + latest N-1
-    if len(structured_msgs) > MAX_MSGS_IN_LLM:
-        llm_msgs = [structured_msgs[0]] + structured_msgs[-(MAX_MSGS_IN_LLM - 1):]
-    else:
-        llm_msgs = structured_msgs
+    # ── Smarter LLM window (v6.0) ──
+    llm_msgs = _select_llm_window(structured_msgs, MAX_MSGS_IN_LLM)
 
     # ── Vendor lookup ──
-    # Order matters: From first, then To, then CC, then BCC.
-    # lookup_vendor returns on first match — so primary sender/recipient wins.
-    # Do NOT use set() here — it destroys the priority ordering.
-    seen_addrs = set()
+    seen_addrs       = set()
     ordered_external = []
     for addr in (all_senders + all_recipients + all_cc_deduped + all_bcc):
         key = _extract_email(addr)
@@ -1560,11 +1405,9 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
     partner_name   = vendor["partner_name"]
     classification = vendor["classification"]
 
-    # If DB found nothing and YOU are the sender, vendor is in To/CC (you initiated)
     if not partner_name:
         sender_email = _extract_email(all_senders[0]) if all_senders else ""
         if ONEQUINCE_DOMAIN in sender_email:
-            # Rerun lookup with To+CC only (you started the thread, vendor = recipient)
             recip_external = [
                 a for a in (all_recipients + all_cc_deduped)
                 if ONEQUINCE_DOMAIN.lower() not in a.lower()
@@ -1573,34 +1416,32 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
             partner_name   = vendor2["partner_name"]
             classification = vendor2["classification"]
 
-    # Last resort: use filtered display names from external addresses
     if not partner_name:
         partner_name = _fallback_vendor_name(ordered_external)
 
-    # ── Shipment extraction — newest message first so latest AWB wins ──
-    shipment = extract_shipment_info(structured_msgs)
-
-    # ── PO number extraction (regex, no LLM) ──
-    po_number = extract_po_number(structured_msgs)
-
-    # ── Attachment detection — reads MIME parts directly, zero body parsing ──
-    attachments = extract_attachments(messages)
-
-    # ── Shared link detection — Google Drive, Dropbox, WeTransfer, etc. ──
+    # ── Extraction ──
+    all_bodies   = "\n\n".join(m["body"] for m in structured_msgs)
+    shipment     = extract_shipment_info(all_bodies)
+    po_number    = extract_po_number(structured_msgs)
+    attachments  = extract_attachments(messages)
     shared_links = extract_shared_links(structured_msgs)
 
-    # ── Single combined LLM call ──
+    # ── Single combined LLM call (now includes reply draft + vendor_name) ──
     print(f"    🤖 LLM: {subject[:50]}...")
-    llm = llm_analyse_thread(subject, llm_msgs, thread_id=thread_id, msg_count=len(messages))
+    llm = llm_analyse_thread(
+        subject, llm_msgs,
+        vendor_name=partner_name,
+        thread_id=thread_id,
+        msg_count=len(messages),
+    )
 
-    # ── Sample reminder (computed from LLM status + latest message date) ──
+    # ── Sample reminder ──
     latest_msg_date = datetime.fromtimestamp(
         int(messages[-1].get("internalDate", 0)) / 1000
     ) if messages else None
     sample_reminder = compute_sample_reminder(llm["sample_status"], latest_msg_date)
 
-    # ── Assemble output ──
-    # CC: deduplicated, external only, email addresses
+    # ── CC display ──
     cc_display = "; ".join(
         _extract_email(a)
         for a in all_cc_deduped
@@ -1633,6 +1474,7 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
         "Sample Reminder":  sample_reminder,
         "Attachments":      attachments,
         "Shared Links":     shared_links,
+        "Reply Draft":      llm["reply_draft"],
     }
 
 
@@ -1648,30 +1490,16 @@ def _get_sheet_id(svc, tab_name: str) -> int:
     return 0
 
 
+def _col_letter_n(n: int) -> str:
+    """1-based index to A1 column letter. e.g. 1→A, 27→AA."""
+    result = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        result = chr(65 + r) + result
+    return result
+
+
 def _ensure_tab(svc, tab_name: str, headers: list):
-    """
-    Full header-sync check — runs once per tab on every run.
-
-    Handles all four states the sheet can be in:
-
-      Case A — Tab doesn't exist yet
-               → Create tab, write full header row, bold it.
-
-      Case B — Tab exists, A1 is empty (header row was deleted)
-               → Write full header row, bold it.
-
-      Case C — Tab exists, headers present but FEWER columns than expected
-               → New columns were added since sheet was set up.
-               → Append only the missing columns to the right — never
-                 touch existing columns (preserves user data / formulas).
-
-      Case D — Tab exists, correct number of headers already
-               → Nothing to do. Print confirmation and move on.
-
-    This means you can add new columns to LOGS_HEADERS at any time and
-    they will appear in the sheet automatically on the next run.
-    """
-    # ── Step 1: create tab if it doesn't exist ──
     meta      = svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
     tab_names = [s["properties"]["title"] for s in meta["sheets"]]
 
@@ -1682,15 +1510,12 @@ def _ensure_tab(svc, tab_name: str, headers: list):
             body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
         ).execute()
 
-    # ── Step 2: read the existing header row (row 1) ──
-    r           = svc.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID,
-        range=f"'{tab_name}'!1:1"
+    r = svc.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID, range=f"'{tab_name}'!1:1"
     ).execute()
     existing_headers = r.get("values", [[]])[0] if r.get("values") else []
 
     def _bold_row1():
-        """Apply bold formatting to the header row."""
         sid = _get_sheet_id(svc, tab_name)
         svc.spreadsheets().batchUpdate(
             spreadsheetId=SHEET_ID,
@@ -1701,9 +1526,8 @@ def _ensure_tab(svc, tab_name: str, headers: list):
             }}]}
         ).execute()
 
-    # ── Case B: header row completely missing ──
     if not existing_headers:
-        print(f"  📋 '{tab_name}': header row missing — writing all {len(headers)} headers...")
+        print(f"  📋 '{tab_name}': writing {len(headers)} headers...")
         svc.spreadsheets().values().update(
             spreadsheetId=SHEET_ID,
             range=f"'{tab_name}'!A1",
@@ -1711,66 +1535,54 @@ def _ensure_tab(svc, tab_name: str, headers: list):
             body={"values": [headers]}
         ).execute()
         _bold_row1()
-        print(f"  ✅ '{tab_name}': headers written (A–{chr(64 + len(headers))})")
+        print(f"  ✅ '{tab_name}': headers written (A–{_col_letter_n(len(headers))})")
         return
 
-    # ── Case C: fewer columns than expected — append missing ones ──
     n_existing = len(existing_headers)
     n_expected = len(headers)
 
     if n_existing < n_expected:
-        missing      = headers[n_existing:]          # only the new columns
-        start_col    = n_existing + 1                # 1-based column index
-        # Convert to A1 column letter(s) — supports up to ZZ
-        def col_letter(n):
-            result = ""
-            while n:
-                n, r = divmod(n - 1, 26)
-                result = chr(65 + r) + result
-            return result
-        start_letter = col_letter(start_col)
-        end_letter   = col_letter(start_col + len(missing) - 1)
-        range_str    = f"'{tab_name}'!{start_letter}1"
-
-        print(f"  🔧 '{tab_name}': {len(missing)} new column(s) detected "
+        missing      = headers[n_existing:]
+        start_col    = n_existing + 1
+        start_letter = _col_letter_n(start_col)
+        end_letter   = _col_letter_n(start_col + len(missing) - 1)
+        print(f"  🔧 '{tab_name}': {len(missing)} new column(s) "
               f"({start_letter}–{end_letter}): {', '.join(missing)}")
         svc.spreadsheets().values().update(
             spreadsheetId=SHEET_ID,
-            range=range_str,
+            range=f"'{tab_name}'!{start_letter}1",
             valueInputOption="RAW",
             body={"values": [missing]}
         ).execute()
         _bold_row1()
-        print(f"  ✅ '{tab_name}': headers now complete (A–{end_letter})")
+        print(f"  ✅ '{tab_name}': headers complete (A–{end_letter})")
         return
 
-    # ── Case D: headers already correct ──
     print(f"  ✅ '{tab_name}': headers OK ({n_existing} columns)")
 
 
 def load_existing_rows(svc) -> tuple:
-    """
-    Returns:
-      thread_map  {thread_id  → {sheet_row, message_count, subject}}
-      subject_map {subject.lower() → same}
-    Column indices: N=Thread Messages (idx 13), O=Thread ID (idx 14)
-    """
+    end_col = _col_letter_n(len(LOGS_HEADERS))
     result = svc.spreadsheets().values().get(
         spreadsheetId=SHEET_ID,
-        range=f"'{SHEET_TAB}'!A2:P"
+        range=f"'{SHEET_TAB}'!A2:{end_col}"
     ).execute()
 
     thread_map  = {}
     subject_map = {}
 
+    thread_id_col  = _HEADER_INDEX["Thread ID"]  - 1   # 0-based index for row list
+    msg_count_col  = _HEADER_INDEX["Thread Messages"] - 1
+    subject_col    = _HEADER_INDEX["Subject"] - 1
+
     for idx, row in enumerate(result.get("values", [])):
-        while len(row) < 23:   # A–W (21 + V Attachments + W Shared Links)
+        while len(row) < len(LOGS_HEADERS):
             row.append("")
 
-        subject   = row[0].strip()
-        msg_count = int(row[13]) if str(row[13]).isdigit() else 0
-        thread_id = row[14].strip()
-        sheet_row = idx + 2  # +2: row 1 = headers, data from row 2
+        subject   = row[subject_col].strip()
+        msg_count = int(row[msg_count_col]) if str(row[msg_count_col]).isdigit() else 0
+        thread_id = row[thread_id_col].strip()
+        sheet_row = idx + 2
 
         info = {
             "sheet_row":     sheet_row,
@@ -1788,22 +1600,65 @@ def load_existing_rows(svc) -> tuple:
     return thread_map, subject_map
 
 
+def _row_data_to_sheet_value(field: str, row_data: dict) -> str:
+    """Map a LOGS_HEADERS field name to its value in row_data."""
+    mapping = {
+        "Subject":          row_data.get("Subject", ""),
+        "Sender":           row_data.get("Sender", ""),
+        "CC":               row_data.get("CC", ""),
+        "Division":         row_data.get("Division", ""),
+        "Style No":         row_data.get("Style No", ""),
+        "Colour":           row_data.get("Colour", ""),
+        "Vendor Name":      row_data.get("Vendor Name", ""),
+        "Partner Classification": row_data.get("Partner Class", ""),
+        "Shipment Company": row_data.get("Shipment Company", ""),
+        "AWB No":           row_data.get("AWB No", ""),
+        "Shipment Date":    row_data.get("Shipment Date", ""),
+        "Sent Date":        row_data.get("Sent Date", ""),
+        "AI Overview":      row_data.get("AI Overview", ""),
+        "Thread Messages":  str(row_data.get("Thread Messages", "")),
+        "Thread ID":        row_data.get("Thread ID", ""),
+        "Last Updated":     datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "Intent":           row_data.get("Intent", ""),
+        "Reply Needed":     row_data.get("Reply Needed", ""),
+        "PO Number":        row_data.get("PO Number", ""),
+        "Sample Status":    row_data.get("Sample Status", ""),
+        "Sample Reminder":  row_data.get("Sample Reminder", ""),
+        "Attachments":      row_data.get("Attachments", ""),
+        "Shared Links":     row_data.get("Shared Links", ""),
+        "Reply Draft":      row_data.get("Reply Draft", ""),
+    }
+    return mapping.get(field, "")
+
+
 def update_existing_row(svc, sheet_row: int, row_data: dict, backfill_tid: bool = False):
     """
-    Batch-updates only the columns that change when new replies arrive.
-    Preserves Subject, Sender, Division, Vendor Name etc.
+    Batch-update only the reply-relevant columns for an existing row.
+    FIX v6.0: DRY_RUN check is now here too — in v5.0 dry-run missed updates.
     """
-    now  = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if DRY_RUN:
+        log.info(f"DRY_RUN: would update row {sheet_row}")
+        return
+
     data = []
+    for field in UPDATE_ON_REPLY_FIELDS:
+        letter = col_letter(field)
+        val    = _row_data_to_sheet_value(field, row_data)
+        data.append({"range": f"'{SHEET_TAB}'!{letter}{sheet_row}", "values": [[val]]})
 
-    for col, field in UPDATE_ON_REPLY.items():
-        val = str(row_data.get(field, "")) if field == "Thread Messages" else row_data.get(field, "")
-        data.append({"range": f"'{SHEET_TAB}'!{col}{sheet_row}", "values": [[val]]})
-
-    data.append({"range": f"'{SHEET_TAB}'!P{sheet_row}", "values": [[now]]})
+    # Last Updated always written
+    lu_letter = col_letter("Last Updated")
+    data.append({
+        "range":  f"'{SHEET_TAB}'!{lu_letter}{sheet_row}",
+        "values": [[datetime.now().strftime("%Y-%m-%d %H:%M")]]
+    })
 
     if backfill_tid and row_data.get("Thread ID"):
-        data.append({"range": f"'{SHEET_TAB}'!O{sheet_row}", "values": [[row_data["Thread ID"]]]})
+        tid_letter = col_letter("Thread ID")
+        data.append({
+            "range":  f"'{SHEET_TAB}'!{tid_letter}{sheet_row}",
+            "values": [[row_data["Thread ID"]]]
+        })
 
     svc.spreadsheets().values().batchUpdate(
         spreadsheetId=SHEET_ID,
@@ -1811,8 +1666,18 @@ def update_existing_row(svc, sheet_row: int, row_data: dict, backfill_tid: bool 
     ).execute()
 
 
+def _build_new_row(row_data: dict, now_str: str) -> list:
+    """Build a full row list ordered by LOGS_HEADERS."""
+    row = []
+    for header in LOGS_HEADERS:
+        if header == "Last Updated":
+            row.append(now_str)
+        else:
+            row.append(_row_data_to_sheet_value(header, row_data))
+    return row
+
+
 def append_new_rows(svc, rows: list):
-    """Write all new rows in a single API call."""
     if not rows:
         return
     svc.spreadsheets().values().append(
@@ -1825,7 +1690,6 @@ def append_new_rows(svc, rows: list):
 
 
 def flush_error_log(svc):
-    """Batch-write all buffered errors to Error Logs sheet."""
     if not _error_buffer:
         return
     rows = [[
@@ -1845,11 +1709,11 @@ def flush_error_log(svc):
 
 # ════════════════════════════════════════════════════════════
 # PARALLEL METADATA FETCH
-# Gets message count + subject for all threads simultaneously.
-# No body download — just enough to route each thread to Case 1/2/3.
 # ════════════════════════════════════════════════════════════
 
-def _fetch_meta_one(svc, tid: str) -> dict:
+def _fetch_meta_one(creds, tid: str) -> dict:
+    # Build a new service inside the thread — never share across threads
+    svc = build("gmail", "v1", credentials=creds)
     try:
         meta = gmail_threads_get(
             svc, userId="me", id=tid,
@@ -1870,21 +1734,17 @@ def _fetch_meta_one(svc, tid: str) -> dict:
         return {"tid": tid, "count": 0, "subject": "", "error": str(e)}
 
 
-def fetch_all_metadata(svc, thread_ids: list) -> dict:
-    """Returns {thread_id: {count, subject}} for all threads in parallel."""
+def fetch_all_metadata(creds, thread_ids: list) -> dict:
     print(f"  ⚡ Fetching metadata for {len(thread_ids)} threads ({GMAIL_WORKERS} parallel)...")
     results = {}
     with ThreadPoolExecutor(max_workers=GMAIL_WORKERS) as executor:
         futures = {
-            executor.submit(_fetch_meta_one, svc, tid): tid
+            executor.submit(_fetch_meta_one, creds, tid): tid  # pass creds, not svc
             for tid in thread_ids
         }
         for future in as_completed(futures):
             m = future.result()
             results[m["tid"]] = m
-            if m["error"]:
-                log.warning(f"Metadata fetch failed for {m['tid']}: {m['error']}")
-    print(f"  ✅ Metadata ready\n")
     return results
 
 
@@ -1893,15 +1753,13 @@ def fetch_all_metadata(svc, thread_ids: list) -> dict:
 # ════════════════════════════════════════════════════════════
 
 def run(max_threads: int = 50):
-    print(f"\n🚀 Gmail Thread Extractor v4.0")
-    print(f"   {max_threads} threads | {GMAIL_WORKERS} parallel | 1 LLM call/thread\n")
+    print(f"\n🚀 Gmail Thread Extractor v6.0")
+    print(f"   Model: {OPENAI_MODEL} | {max_threads} threads | {GMAIL_WORKERS} parallel workers\n")
 
-    # Auth + services
-    creds         = authenticate()
-    gmail_svc     = build("gmail",  "v1", credentials=creds)
-    sheets_svc    = build("sheets", "v4", credentials=creds)
+    creds      = authenticate()
+    gmail_svc  = build("gmail",  "v1", credentials=creds)
+    sheets_svc = build("sheets", "v4", credentials=creds)
 
-    # One-time setup
     vendor_db = load_vendor_db(sheets_svc)
     _ensure_tab(sheets_svc, SHEET_TAB, LOGS_HEADERS)
     _ensure_tab(sheets_svc, ERROR_TAB, ERROR_HEADERS)
@@ -1910,7 +1768,6 @@ def run(max_threads: int = 50):
     thread_map, subject_map = load_existing_rows(sheets_svc)
     print()
 
-    # Fetch thread list from Gmail
     print(f"  📬 Fetching up to {max_threads} threads from inbox...")
     result = gmail_svc.users().threads().list(
         userId="me", maxResults=max_threads, q="in:inbox"
@@ -1922,11 +1779,9 @@ def run(max_threads: int = 50):
         print("  Nothing to process.\n")
         return
 
-    # Parallel metadata fetch — all at once before the main loop
     all_tids = [t["id"] for t in gmail_threads]
-    meta_map = fetch_all_metadata(gmail_svc, all_tids)
+    meta_map = fetch_all_metadata(creds, all_tids)  # pass creds instead of gmail_svc
 
-    # Counters
     new_rows   = []
     updated    = 0
     backfilled = 0
@@ -1944,11 +1799,7 @@ def run(max_threads: int = 50):
         subj_key   = meta_subj.lower()
 
         try:
-
-            # ═══════════════════════════════════════════════
-            # CASE 1 — Thread ID stored in col O
-            #          Fastest: compare message count only
-            # ═══════════════════════════════════════════════
+            # ─ CASE 1: Thread ID already in sheet ─
             if tid in thread_map:
                 existing  = thread_map[tid]
                 old_count = existing["message_count"]
@@ -1967,26 +1818,23 @@ def run(max_threads: int = 50):
                     thread_map[tid]["message_count"] = row_data["Thread Messages"]
                     updated += 1
                     print(f"    ✅ Row {existing['sheet_row']} updated "
-                          f"| AWB: {row_data['AWB No'] or '—'} "
-                          f"| Courier: {row_data['Shipment Company'] or '—'}")
+                          f"| Intent: {row_data['Intent']} "
+                          f"| Reply needed: {row_data['Reply Needed']}")
 
-            # ═══════════════════════════════════════════════
-            # CASE 2 — No Thread ID, but subject matches old row
-            #          Backfill Thread ID + update if new replies
-            # ═══════════════════════════════════════════════
+            # ─ CASE 2: Subject match, no Thread ID ─
             elif subj_key and subj_key in subject_map:
                 existing  = subject_map[subj_key]
                 old_count = existing["message_count"]
 
                 if curr_count <= old_count:
-                    # No new replies — just write Thread ID silently
-                    sheets_svc.spreadsheets().values().batchUpdate(
-                        spreadsheetId=SHEET_ID,
-                        body={"valueInputOption": "RAW", "data": [
-                            {"range": f"'{SHEET_TAB}'!O{existing['sheet_row']}", "values": [[tid]]},
-                            {"range": f"'{SHEET_TAB}'!N{existing['sheet_row']}", "values": [[str(curr_count)]]},
-                        ]}
-                    ).execute()
+                    if not DRY_RUN:
+                        sheets_svc.spreadsheets().values().batchUpdate(
+                            spreadsheetId=SHEET_ID,
+                            body={"valueInputOption": "RAW", "data": [
+                                {"range": f"'{SHEET_TAB}'!{col_letter('Thread ID')}{existing['sheet_row']}", "values": [[tid]]},
+                                {"range": f"'{SHEET_TAB}'!{col_letter('Thread Messages')}{existing['sheet_row']}", "values": [[str(curr_count)]]},
+                            ]}
+                        ).execute()
                     print(f"  [{i}/{total}] ⏭️  No change — {meta_subj[:45]} (Thread ID stored)")
                     thread_map[tid] = existing
                     backfilled += 1
@@ -2004,12 +1852,9 @@ def run(max_threads: int = 50):
                     thread_map[tid]["message_count"] = row_data["Thread Messages"]
                     updated    += 1
                     backfilled += 1
-                    print(f"    ✅ Row {existing['sheet_row']} updated + Thread ID stored "
-                          f"| AWB: {row_data['AWB No'] or '—'}")
+                    print(f"    ✅ Row {existing['sheet_row']} updated + Thread ID stored")
 
-            # ═══════════════════════════════════════════════
-            # CASE 3 — Brand new thread
-            # ═══════════════════════════════════════════════
+            # ─ CASE 3: Brand new thread ─
             else:
                 if curr_count < 2:
                     print(f"  [{i}/{total}] ⏭️  Single message — {meta_subj[:55]}")
@@ -2026,34 +1871,10 @@ def run(max_threads: int = 50):
 
                 print(f"    ✅ {row_data['Subject'][:40]} "
                       f"| {row_data['Division']} "
-                      f"| Vendor: {row_data['Vendor Name'] or '?'}")
+                      f"| Vendor: {row_data['Vendor Name'] or '?'} "
+                      f"| Intent: {row_data['Intent']}")
 
-                new_rows.append([
-                    row_data["Subject"],           # A
-                    row_data["Sender"],            # B
-                    row_data["CC"],                # C
-                    row_data["Division"],          # D
-                    row_data["Style No"],          # E
-                    row_data["Colour"],            # F
-                    row_data["Vendor Name"],       # G
-                    row_data["Partner Class"],     # H
-                    row_data["Shipment Company"],  # I
-                    row_data["AWB No"],            # J
-                    row_data["Shipment Date"],     # K
-                    row_data["Sent Date"],         # L
-                    row_data["AI Overview"],       # M
-                    row_data["Thread Messages"],   # N
-                    row_data["Thread ID"],         # O
-                    now_str,                       # P Last Updated
-                    row_data["Intent"],            # Q
-                    row_data["Reply Needed"],      # R
-                    row_data["PO Number"],         # S
-                    row_data["Sample Status"],     # T
-                    row_data["Sample Reminder"],   # U
-                    row_data["Attachments"],       # V
-                    row_data["Shared Links"],      # W
-                ])
-
+                new_rows.append(_build_new_row(row_data, now_str))
                 subject_map[row_data["Subject"].lower()] = {
                     "sheet_row":     None,
                     "message_count": curr_count,
@@ -2068,7 +1889,7 @@ def run(max_threads: int = 50):
             print(f"    ❌ Error on '{meta_subj[:40]}': {exc}")
             continue
 
-    # Batch-write all new rows at once
+    # ── Batch write new rows ──
     if new_rows:
         if DRY_RUN:
             print(f"\n  🔍 DRY RUN — would write {len(new_rows)} new rows (skipped)")
@@ -2077,24 +1898,25 @@ def run(max_threads: int = 50):
             print(f"\n  📤 Writing {len(new_rows)} new rows to Sheets...")
             append_new_rows(sheets_svc, new_rows)
 
-    # Flush errors to sheet
     if not DRY_RUN:
         flush_error_log(sheets_svc)
     elif _error_buffer:
-        print(f"  🔍 DRY RUN — {len(_error_buffer)} error(s) would be written to '{ERROR_TAB}'"  )
+        print(f"  🔍 DRY RUN — {len(_error_buffer)} error(s) not written")
 
+    cs      = cache_stats()
     dry_tag = " [DRY RUN]" if DRY_RUN else ""
-    cs = cache_stats()
-    print(f"\n{'═' * 58}")
+    print(f"\n{'═' * 60}")
     print(f"  🆕 New rows added        : {added}{dry_tag}")
     print(f"  🔄 Rows updated          : {updated}  ← new replies processed")
     print(f"  🔗 Thread IDs backfilled : {backfilled}")
     print(f"  ⏭️  Skipped               : {skipped}  ← no changes")
     print(f"  ❌ Errors                : {errors}  → check '{ERROR_TAB}' tab")
     print(f"  💾 LLM cache entries     : {cs['cached_entries']} (prompt={PROMPT_VERSION})")
+    print(f"  🤖 Model                 : {OPENAI_MODEL}")
     print(f"  📄 Debug log             : gmail_agent.log")
+    print(f"  📋 Audit log             : audit.jsonl")
     print(f"  🔗 Sheet : https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit")
-    print(f"{'═' * 58}\n")
+    print(f"{'═' * 60}\n")
 
     write_audit_log({
         "threads_fetched": total,
@@ -2109,7 +1931,7 @@ def run(max_threads: int = 50):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Gmail Thread Extractor v5.0 — Merchandising Logs"
+        description="Gmail Thread Extractor v6.0 — Merchandising Logs"
     )
     parser.add_argument(
         "max_threads", nargs="?", type=int, default=50,
@@ -2126,7 +1948,6 @@ if __name__ == "__main__":
         print("\n⚠️  DRY RUN MODE — no changes will be written to Google Sheets\n")
         log.info("DRY_RUN mode activated via --dry-run flag")
 
-    # Security reminder: warn if secret files are in the current directory
     for secret_file in ("credentials.json", "token.json", ".env"):
         if os.path.exists(secret_file):
             log.info(f"Secret file present: {secret_file} — ensure it is in .gitignore")

@@ -6,6 +6,7 @@ token.json
 # Logs and Data
 gmail_agent.log
 llm_cache.db
+audit.jsonl
 
 # Virtual Environments
 .venv/

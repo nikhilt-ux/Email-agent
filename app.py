@@ -1,10 +1,29 @@
+"""
+Merchandising AI Agent — Streamlit Frontend  v2.0
+═══════════════════════════════════════════════════
+Fully synced with gmail_reader v6.0 (24 columns A–X).
+
+CHANGES FROM v1.0:
+  ✅ All 24 columns loaded from sheet (was A:R only — missed PO, Sample, Attachments, Links, Reply Draft)
+  ✅ fetch_all_metadata fixed — passes creds per thread, no shared SSL socket crash
+  ✅ new_rows built via _build_new_row() — no more hardcoded 18-col list
+  ✅ Case 2 backfill uses col_letter() not hardcoded "O"/"N"
+  ✅ Reply Draft column rendered as a copyable text area in Thread Viewer
+  ✅ Sample Status / Sample Reminder / PO Number shown in Thread Viewer
+  ✅ Attachments + Shared Links shown in Thread Viewer
+  ✅ Dashboard metrics expanded: Sample alerts, top division, PO threads
+  ✅ New "Needs Chase" tab on dashboard — threads with ⚠️ reminders
+  ✅ Thread Viewer: Division filter added
+  ✅ load_data_from_sheets loads full A:X range dynamically from LOGS_HEADERS
+  ✅ Proper DRY_RUN threading through update_existing_row (already gated in v6 core)
+"""
+
 import os
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 from googleapiclient.discovery import build
 
-# Import building blocks from the core script
 from gmail_reader import (
     authenticate,
     load_vendor_db,
@@ -15,329 +34,577 @@ from gmail_reader import (
     update_existing_row,
     append_new_rows,
     flush_error_log,
-    fetch_all_metadata,
     _ensure_tab,
     LOGS_HEADERS,
     ERROR_TAB,
     ERROR_HEADERS,
     record_error,
     cache_stats,
-    write_audit_log
+    write_audit_log,
+    col_letter,
+    _build_new_row,
+    _col_letter_n,
 )
 import gmail_reader
 
-# Configuration & Page Setup
+# ── Page config ──────────────────────────────────────────────
 st.set_page_config(
     page_title="Merchandising AI Agent",
-    page_icon="🤖",
+    page_icon="🧵",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🤖 Merchandising Email AI Agent")
+# ── Custom CSS ───────────────────────────────────────────────
+st.markdown("""
+<style>
+    /* Tighter card padding */
+    div[data-testid="stExpander"] { border-radius: 10px; border: 1px solid #e0e0e0; margin-bottom: 8px; }
+    /* Reply draft box */
+    .reply-box { background: #f0f7ff; border-left: 3px solid #1a73e8; padding: 12px 16px;
+                 border-radius: 0 8px 8px 0; font-family: monospace; font-size: 13px;
+                 white-space: pre-wrap; line-height: 1.6; }
+    /* Intent badge */
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 12px;
+             font-size: 12px; font-weight: 600; }
+    .badge-chase  { background:#fff3cd; color:#856404; }
+    .badge-ship   { background:#d1ecf1; color:#0c5460; }
+    .badge-quality{ background:#f8d7da; color:#721c24; }
+    .badge-sample { background:#d4edda; color:#155724; }
+    .badge-other  { background:#e2e3e5; color:#383d41; }
+    /* Chase warning */
+    .chase-row { background: #fff8e1; border-left: 3px solid #ffc107;
+                 padding: 8px 12px; border-radius: 0 6px 6px 0; margin: 4px 0; font-size: 13px; }
+    /* Metric delta override */
+    div[data-testid="stMetricDelta"] { font-size: 12px; }
+</style>
+""", unsafe_allow_html=True)
 
-# Sidebar navigation
-st.sidebar.header("Navigation")
-page = st.sidebar.radio("Go to", ["Dashboard", "Sync Gmail", "Thread Viewer"])
-
-# Initialize session state for cached data
-if 'df_logs' not in st.session_state:
+# ── Session state ─────────────────────────────────────────────
+if "df_logs" not in st.session_state:
     st.session_state.df_logs = None
 
-def get_google_services():
-    creds = authenticate()
-    gmail_svc = build("gmail", "v1", credentials=creds)
-    sheets_svc = build("sheets", "v4", credentials=creds)
-    return gmail_svc, sheets_svc
+# ── Helpers ───────────────────────────────────────────────────
 
-def load_data_from_sheets():
-    _, sheets_svc = get_google_services()
+def get_google_services():
+    """Return (gmail_svc, sheets_svc, creds). Creds returned separately for thread-safe use."""
+    creds      = authenticate()
+    gmail_svc  = build("gmail",  "v1", credentials=creds)
+    sheets_svc = build("sheets", "v4", credentials=creds)
+    return gmail_svc, sheets_svc, creds
+
+
+def load_data_from_sheets() -> pd.DataFrame:
+    """Load ALL columns (A–X) from the Logs sheet, using LOGS_HEADERS as canonical list."""
+    _, sheets_svc, _ = get_google_services()
+    end_col = _col_letter_n(len(LOGS_HEADERS))
     try:
         result = sheets_svc.spreadsheets().values().get(
             spreadsheetId=SHEET_ID,
-            range=f"'{SHEET_TAB}'!A:R"
+            range=f"'{SHEET_TAB}'!A:{end_col}"
         ).execute()
         rows = result.get("values", [])
         if len(rows) > 1:
             headers = rows[0]
-            data = rows[1:]
-            df = pd.DataFrame(data, columns=headers)
+            data    = rows[1:]
+            # Pad short rows to header length
+            padded = [r + [""] * (len(headers) - len(r)) for r in data]
+            df = pd.DataFrame(padded, columns=headers)
             st.session_state.df_logs = df
             return df
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Failed to load data from Google Sheets: {e}")
+        st.error(f"Failed to load data: {e}")
         return pd.DataFrame()
 
-# Main Routing logic
-if page == "Dashboard":
-    st.header("📊 Overview Dashboard")
-    
+
+def fetch_all_metadata_safe(creds, thread_ids: list) -> dict:
+    """
+    Thread-safe metadata fetch — each worker builds its own gmail service.
+    Fixes the SSL segfault from the v1 frontend which passed a shared gmail_svc.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import re
+    from gmail_reader import gmail_threads_get, GMAIL_WORKERS
+
+    def _fetch_one(cred, tid):
+        svc = build("gmail", "v1", credentials=cred)
+        try:
+            meta        = gmail_threads_get(svc, userId="me", id=tid,
+                                            format="metadata", metadataHeaders=["Subject"])
+            msgs        = meta.get("messages", [])
+            raw_subject = ""
+            if msgs:
+                for h in msgs[0].get("payload", {}).get("headers", []):
+                    if h["name"].lower() == "subject":
+                        raw_subject = h["value"]
+                        break
+            clean = re.sub(r'^(re|fwd|fw):\s*', '', raw_subject, flags=re.IGNORECASE).strip()
+            return {"tid": tid, "count": len(msgs), "subject": clean, "error": None}
+        except Exception as e:
+            return {"tid": tid, "count": 0, "subject": "", "error": str(e)}
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=GMAIL_WORKERS) as ex:
+        futures = {ex.submit(_fetch_one, creds, tid): tid for tid in thread_ids}
+        for fut in as_completed(futures):
+            m = fut.result()
+            results[m["tid"]] = m
+    return results
+
+
+def _safe_col(df: pd.DataFrame, col: str, default="") -> pd.Series:
+    """Return column if it exists, else a Series of defaults."""
+    return df[col] if col in df.columns else pd.Series([default] * len(df))
+
+
+def _intent_badge(intent: str) -> str:
+    cls = "badge-other"
+    if "Chase"    in intent: cls = "badge-chase"
+    elif "Track"  in intent or "Await" in intent: cls = "badge-ship"
+    elif "quality" in intent.lower(): cls = "badge-quality"
+    elif "sample" in intent.lower() or "Approve" in intent: cls = "badge-sample"
+    return f'<span class="badge {cls}">{intent}</span>'
+
+
+# ── Sidebar ───────────────────────────────────────────────────
+st.sidebar.image("https://img.icons8.com/fluency/96/sewing-machine.png", width=64)
+st.sidebar.title("Merchandising\nAI Agent")
+st.sidebar.markdown("---")
+page = st.sidebar.radio("", ["📊 Dashboard", "🔄 Sync Gmail", "🗂️ Thread Viewer"])
+st.sidebar.markdown("---")
+
+if st.sidebar.button("🔃 Refresh Data"):
+    st.session_state.df_logs = None
+    st.rerun()
+
+cs = cache_stats()
+st.sidebar.caption(f"💾 LLM cache: {cs.get('cached_entries', 0)} entries")
+
+
+# ════════════════════════════════════════════════════════════
+# PAGE: DASHBOARD
+# ════════════════════════════════════════════════════════════
+if page == "📊 Dashboard":
+    st.title("📊 Overview Dashboard")
+
     df = st.session_state.df_logs if st.session_state.df_logs is not None else load_data_from_sheets()
-    
+
     if df.empty:
-        st.info("No data found. Go to 'Sync Gmail' to pull in some threads.")
-    else:
-        # Layout top-level metrics
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Threads Processed", len(df))
-        
-        requires_reply_count = len(df[df.get("Reply Needed", "") == "Yes"])
-        col2.metric("Requires Reply", requires_reply_count)
-        
-        # Safe metric calculation for Intent
+        st.info("No data yet — go to **Sync Gmail** to pull threads.")
+        st.stop()
+
+    # ── Top metrics row ──────────────────────────────────────
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+    total_threads = len(df)
+    c1.metric("Total Threads", total_threads)
+
+    reply_count = len(df[_safe_col(df, "Reply Needed") == "Yes"])
+    c2.metric("Needs Reply", reply_count, delta=f"{round(reply_count/max(total_threads,1)*100)}%")
+
+    chase_count = len(df[_safe_col(df, "Sample Reminder").str.startswith("⚠️", na=False)])
+    c3.metric("⚠️ Chase Alerts", chase_count)
+
+    po_count = len(df[_safe_col(df, "PO Number") != ""])
+    c4.metric("Threads with PO", po_count)
+
+    dispatched = len(df[_safe_col(df, "Sample Status") == "Dispatched"])
+    c5.metric("Samples Dispatched", dispatched)
+
+    if "Division" in df.columns and not df["Division"].empty:
+        top_div = df["Division"].value_counts().idxmax()
+        c6.metric("Top Division", top_div)
+
+    st.divider()
+
+    # ── Chase alerts table ───────────────────────────────────
+    chase_df = df[_safe_col(df, "Sample Reminder").str.startswith("⚠️", na=False)]
+    if not chase_df.empty:
+        st.subheader(f"⚠️ Chase Alerts ({len(chase_df)})")
+        for _, row in chase_df.iterrows():
+            st.markdown(
+                f'<div class="chase-row">'
+                f'<b>{row.get("Vendor Name","?")}</b> — {row.get("Subject","")[:60]}'
+                f'&nbsp;&nbsp;&nbsp;<span style="color:#856404">{row.get("Sample Reminder","")}</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        st.divider()
+
+    # ── Charts row ───────────────────────────────────────────
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+        st.subheader("By Intent")
         if "Intent" in df.columns:
-            top_intent = df['Intent'].value_counts().idxmax() if not df['Intent'].empty else "N/A"
-            col3.metric("Top Intent", top_intent)
-            
-        if "Vendor Name" in df.columns:
-            top_vendor = df[df['Vendor Name'] != '']['Vendor Name'].value_counts().idxmax() if not df[df['Vendor Name'] != ''].empty else "N/A"
-            col4.metric("Top Vendor", top_vendor)
-        
+            ic = df["Intent"].value_counts().reset_index()
+            ic.columns = ["Intent", "Count"]
+            st.bar_chart(ic.set_index("Intent"))
+
+    with col_b:
+        st.subheader("By Division")
+        if "Division" in df.columns:
+            dc = df["Division"].value_counts().reset_index()
+            dc.columns = ["Division", "Count"]
+            st.bar_chart(dc.set_index("Division"))
+
+    with col_c:
+        st.subheader("Sample Status")
+        if "Sample Status" in df.columns:
+            sc = df["Sample Status"].value_counts().reset_index()
+            sc.columns = ["Status", "Count"]
+            st.bar_chart(sc.set_index("Status"))
+
+    st.divider()
+
+    # ── Recent activity ──────────────────────────────────────
+    st.subheader("Recent Activity")
+    display_cols = [c for c in
+        ["Sent Date", "Vendor Name", "Subject", "Division", "Intent",
+         "Reply Needed", "Sample Status", "PO Number", "AWB No"]
+        if c in df.columns]
+    recent = df.sort_values("Sent Date", ascending=False).head(10) if "Sent Date" in df.columns else df.head(10)
+    st.dataframe(recent[display_cols], use_container_width=True, hide_index=True)
+
+    # ── Vendor breakdown ─────────────────────────────────────
+    if "Vendor Name" in df.columns:
         st.divider()
-        
-        st.subheader("Recent Activity Summary")
-        if "Sent Date" in df.columns:
-            df_recent = df.sort_values(by="Sent Date", ascending=False).head(5)
-            st.dataframe(df_recent[["Sent Date", "Vendor Name", "Subject", "Intent", "Reply Needed"]], use_container_width=True)
-            
-        st.divider()
-        col_chart1, col_chart2 = st.columns(2)
-        
-        with col_chart1:
-            st.subheader("Threads by Intent")
-            if "Intent" in df.columns:
-                intent_counts = df['Intent'].value_counts().reset_index()
-                intent_counts.columns = ['Intent', 'Count']
-                st.bar_chart(intent_counts.set_index('Intent'))
-                
-        with col_chart2:
-            st.subheader("Threads by Division")
-            if "Division" in df.columns:
-                div_counts = df['Division'].value_counts().reset_index()
-                div_counts.columns = ['Division', 'Count']
-                st.bar_chart(div_counts.set_index('Division'))
+        st.subheader("Vendor Breakdown")
+        vendor_stats = (
+            df[df["Vendor Name"] != ""]
+            .groupby("Vendor Name")
+            .agg(
+                Threads=("Subject", "count"),
+                Reply_Needed=("Reply Needed", lambda x: (x == "Yes").sum()),
+                Latest=("Sent Date", "max"),
+            )
+            .sort_values("Threads", ascending=False)
+            .head(15)
+        )
+        st.dataframe(vendor_stats, use_container_width=True)
 
-elif page == "Sync Gmail":
-    st.header("🔄 Sync Gmail Inbox")
-    st.write("Click below to fetch the latest threads from your inbox, analyze them using Ollama, and write the output to your Google Sheet.")
-    
-    col_config1, col_config2 = st.columns(2)
-    with col_config1:
-        max_threads = st.slider("Max threads to fetch", min_value=1, max_value=100, value=20)
-    with col_config2:
-        st.write("") # Spacing
-        st.write("") # Spacing
-        dry_run = st.checkbox("Dry Run Mode (Don't write to Sheets)")
-        
-    if st.button("Start Sync"):
-        if True: # Bypass OpenAI key check for local Ollama
-            with st.spinner(f"Connecting and Fetching up to {max_threads} threads... this may take a minute."):
-                # 1. Setup Phase
-                gmail_reader.DRY_RUN = dry_run
-                gmail_svc, sheets_svc = get_google_services()
-                vendor_db = load_vendor_db(sheets_svc)
-                if not dry_run:
-                    _ensure_tab(sheets_svc, SHEET_TAB, LOGS_HEADERS)
-                    _ensure_tab(sheets_svc, ERROR_TAB, ERROR_HEADERS)
-                thread_map, subject_map = load_existing_rows(sheets_svc)
-                
-                # Fetch thread list
-                result = gmail_svc.users().threads().list(userId="me", maxResults=max_threads, q="in:inbox").execute()
-                gmail_threads = result.get("threads", [])
-                
-                if not gmail_threads:
-                    st.info("No threads found in inbox.")
-                else:
-                    st.success(f"Found {len(gmail_threads)} threads.")
-                    
-                    # Fetch metadata for fast skip-checking
-                    all_tids = [t["id"] for t in gmail_threads]
-                    meta_map = fetch_all_metadata(gmail_svc, all_tids)
-                    
-                    # Layout containers for live logs
-                    progress_text = "Processing Threads..."
-                    my_bar = st.progress(0, text=progress_text)
-                    log_container = st.empty()
-                    
-                    # Counters
-                    new_rows = []
-                    updated = 0
-                    backfilled = 0
-                    added = 0
-                    skipped = 0
-                    errors = 0
-                    total = len(gmail_threads)
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    
-                    for i, thread in enumerate(gmail_threads, 1):
-                        tid = thread["id"]
-                        meta = meta_map.get(tid, {})
-                        curr_count = meta.get("count", 0)
-                        meta_subj = meta.get("subject", "")
-                        subj_key = meta_subj.lower()
-                        status_msg = ""
-                        
-                        my_bar.progress(int(i/total * 100), text=f"Processing {i}/{total}: {meta_subj[:40]}")
-                        
-                        try:
-                            if tid in thread_map:
-                                existing = thread_map[tid]
-                                old_count = existing["message_count"]
-                                if curr_count <= old_count:
-                                    skipped += 1
-                                    status_msg = f"Skipped (No change): {meta_subj[:30]}"
-                                else:
-                                    row_data = process_thread(gmail_svc, tid, vendor_db)
-                                    if row_data:
-                                        if not dry_run:
-                                            update_existing_row(sheets_svc, existing["sheet_row"], row_data)
-                                        thread_map[tid]["message_count"] = row_data["Thread Messages"]
-                                        updated += 1
-                                        status_msg = f"Updated: {row_data['Subject'][:30]}"
-                            elif subj_key and subj_key in subject_map:
-                                existing = subject_map[subj_key]
-                                old_count = existing["message_count"]
-                                if curr_count <= old_count:
-                                    # Just write tid silently
-                                    if not dry_run:
-                                        sheets_svc.spreadsheets().values().batchUpdate(
-                                            spreadsheetId=SHEET_ID,
-                                            body={"valueInputOption": "RAW", "data": [
-                                                {"range": f"'{SHEET_TAB}'!O{existing['sheet_row']}", "values": [[tid]]},
-                                                {"range": f"'{SHEET_TAB}'!N{existing['sheet_row']}", "values": [[str(curr_count)]]},
-                                            ]}
-                                        ).execute()
-                                    skipped += 1
-                                    backfilled += 1
-                                    status_msg = f"Skipped (TID Backfilled): {meta_subj[:30]}"
-                                else:
-                                    row_data = process_thread(gmail_svc, tid, vendor_db)
-                                    if row_data:
-                                        if not dry_run:
-                                            update_existing_row(sheets_svc, existing["sheet_row"], row_data, backfill_tid=True)
-                                        updated += 1
-                                        backfilled += 1
-                                        status_msg = f"Updated + TID Backfilled: {row_data['Subject'][:30]}"
-                            else:
-                                if curr_count < 2:
-                                    skipped += 1
-                                    status_msg = f"Skipped (Single Msg): {meta_subj[:30]}"
-                                else:
-                                    row_data = process_thread(gmail_svc, tid, vendor_db)
-                                    if row_data is None:
-                                        skipped += 1
-                                        status_msg = f"Skipped (Unreadable): {meta_subj[:30]}"
-                                    else:
-                                        new_rows.append([
-                                            row_data["Subject"], row_data["Sender"], row_data["CC"],
-                                            row_data["Division"], row_data["Style No"], row_data["Colour"],
-                                            row_data["Vendor Name"], row_data["Partner Class"], row_data["Shipment Company"],
-                                            row_data["AWB No"], row_data["Shipment Date"], row_data["Sent Date"],
-                                            row_data["AI Overview"], row_data["Thread Messages"], row_data["Thread ID"],
-                                            now_str, row_data["Intent"], row_data["Reply Needed"],
-                                        ])
-                                        subject_map[row_data["Subject"].lower()] = {
-                                            "sheet_row": None, "message_count": curr_count,
-                                            "thread_id": tid, "subject": row_data["Subject"],
-                                        }
-                                        added += 1
-                                        status_msg = f"Added: {row_data['Subject'][:30]}"
-                        except Exception as exc:
-                            errors += 1
-                            record_error(tid, meta_subj, "process_thread_streamlit", exc)
-                            status_msg = f"Error: {meta_subj[:30]}"
-                            
-                        # Refresh log container
-                        if i % 5 == 0 or i == total:
-                            log_container.text(f"Last Action: {status_msg}\nAdded: {added} | Updated: {updated} | Skipped: {skipped} | Errors: {errors}")
 
-                    # Final Writes + Audit Log
-                    cs = cache_stats()
-                    write_audit_log({
-                        "threads_fetched": total,
-                        "added":           added,
-                        "updated":         updated,
-                        "backfilled":      backfilled,
-                        "skipped":         skipped,
-                        "errors":          errors,
-                        "cache_entries":   cs.get("cached_entries", 0),
-                    })
-                    
-                    if not dry_run:
-                        if new_rows:
-                            append_new_rows(sheets_svc, new_rows)
-                        flush_error_log(sheets_svc)
-                    
-                    my_bar.empty()
-                    st.success("Sync Complete!")
-                    st.balloons()
-                    
-                    if dry_run:
-                        st.info("DRY RUN MODE: No data was written to Google Sheets.")
-                    
-                    col1, col2, col3, col4, col5 = st.columns(5)
-                    col1.metric("New Rows Added", added)
-                    col2.metric("Rows Updated", updated)
-                    col3.metric("Skipped", skipped + backfilled)
-                    col4.metric("Errors", errors)
-                    col5.metric("Cache Hits/Entries", cs.get("cached_entries", 0))
-                    
-                    # Force a dashboard refresh on next load
-                    st.session_state.df_logs = None
+# ════════════════════════════════════════════════════════════
+# PAGE: SYNC GMAIL
+# ════════════════════════════════════════════════════════════
+elif page == "🔄 Sync Gmail":
+    st.title("🔄 Sync Gmail Inbox")
+    st.write("Fetch the latest threads, analyse with GPT, and write to your Google Sheet.")
 
-elif page == "Thread Viewer":
-    st.header("🗂️ Thread Viewer")
-    
-    df = st.session_state.df_logs if st.session_state.df_logs is not None else load_data_from_sheets()
-    
-    if df.empty:
-        st.info("No data found. Please run a sync first.")
-    else:
-        # Filtering Options
-        st.subheader("Filter Threads")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            intent_filter = st.selectbox("Filter by Intent", ["All"] + list(df['Intent'].unique()))
-        with col2:
-            reply_filter = st.selectbox("Reply Needed", ["All", "Yes", "No"])
-        with col3:
-            vendor_filter = st.selectbox("Vendor Name", ["All"] + list(df[df['Vendor Name'] != '']['Vendor Name'].unique()))
-            
-        filtered_df = df.copy()
-        if intent_filter != "All":
-            filtered_df = filtered_df[filtered_df["Intent"] == intent_filter]
-        if reply_filter != "All":
-            filtered_df = filtered_df[filtered_df["Reply Needed"] == reply_filter]
-        if vendor_filter != "All":
-            filtered_df = filtered_df[filtered_df["Vendor Name"] == vendor_filter]
-            
-        st.write(f"Showing {len(filtered_df)} of {len(df)} threads")
-        
-        # Display Results
-        for idx, row in filtered_df.iterrows():
-            with st.expander(f"{row.get('Sent Date', '')} | {row.get('Vendor Name', 'Unknown Vendor')} | {row.get('Subject', 'No Subject')}"):
-                col_left, col_right = st.columns([2, 1])
-                
-                with col_left:
-                    st.markdown("**AI Overview:**")
-                    st.markdown(row.get("AI Overview", "N/A"))
-                    
-                    st.markdown("**Core Data:**")
-                    st.text(f"Style: {row.get('Style No', 'N/A')} | Color: {row.get('Colour', 'N/A')} | Division: {row.get('Division', 'N/A')}")
-                    
-                with col_right:
-                    st.info(f"**Intent:** {row.get('Intent', 'N/A')}")
-                    
-                    reply_needed = row.get("Reply Needed", "No")
-                    if reply_needed == "Yes":
-                        st.warning("⚠️ Reply Needed")
+    col_cfg1, col_cfg2 = st.columns(2)
+    with col_cfg1:
+        max_threads = st.slider("Max threads to fetch", 1, 200, 20)
+    with col_cfg2:
+        st.write("")
+        st.write("")
+        dry_run = st.checkbox("Dry Run (read-only — don't write to Sheets)")
+
+    if st.button("🚀 Start Sync", type="primary"):
+        with st.spinner("Connecting to Google…"):
+            gmail_svc, sheets_svc, creds = get_google_services()
+            gmail_reader.DRY_RUN = dry_run
+            vendor_db = load_vendor_db(sheets_svc)
+
+            if not dry_run:
+                _ensure_tab(sheets_svc, SHEET_TAB, LOGS_HEADERS)
+                _ensure_tab(sheets_svc, ERROR_TAB, ERROR_HEADERS)
+
+            thread_map, subject_map = load_existing_rows(sheets_svc)
+
+        with st.spinner("Fetching thread list…"):
+            result       = gmail_svc.users().threads().list(
+                userId="me", maxResults=max_threads, q="in:inbox"
+            ).execute()
+            gmail_threads = result.get("threads", [])
+
+        if not gmail_threads:
+            st.info("No threads found.")
+            st.stop()
+
+        st.success(f"Found **{len(gmail_threads)}** threads.")
+
+        with st.spinner("Fetching metadata (parallel)…"):
+            all_tids = [t["id"] for t in gmail_threads]
+            # ✅ Thread-safe version — builds a fresh service per worker
+            meta_map = fetch_all_metadata_safe(creds, all_tids)
+
+        progress_bar = st.progress(0)
+        status_area  = st.empty()
+        log_lines    = []
+
+        new_rows   = []
+        updated    = backfilled = added = skipped = errors = 0
+        total      = len(gmail_threads)
+        now_str    = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        for i, thread in enumerate(gmail_threads, 1):
+            tid        = thread["id"]
+            meta       = meta_map.get(tid, {})
+            curr_count = meta.get("count",   0)
+            meta_subj  = meta.get("subject", "")
+            subj_key   = meta_subj.lower()
+            status_msg = ""
+
+            progress_bar.progress(int(i / total * 100),
+                                  text=f"Processing {i}/{total}: {meta_subj[:50]}")
+
+            try:
+                # ── CASE 1: Thread ID already in sheet ──
+                if tid in thread_map:
+                    existing  = thread_map[tid]
+                    old_count = existing["message_count"]
+                    if curr_count <= old_count:
+                        skipped   += 1
+                        status_msg = f"⏭️ No change: {meta_subj[:40]}"
                     else:
-                        st.success("✅ No Reply Needed")
-                        
-                    if row.get("AWB No", ""):
-                        st.success(f"📦 Shipment: {row.get('Shipment Company', '')} {row.get('AWB No', '')}")
-                        
-                # Just a placeholder for the future
-                # The index is used to guarantee uniqueness even if Thread ID is None
-                st.button("Draft AI Reply", key=f"draft_{idx}_{row.get('Thread ID', '')}", disabled=True, help="Feature coming soon!")
+                        row_data = process_thread(gmail_svc, tid, vendor_db)
+                        if row_data:
+                            update_existing_row(sheets_svc, existing["sheet_row"], row_data)
+                            thread_map[tid]["message_count"] = row_data["Thread Messages"]
+                            updated   += 1
+                            status_msg = f"🔄 Updated: {row_data['Subject'][:40]}"
 
+                # ── CASE 2: Subject match, no Thread ID ──
+                elif subj_key and subj_key in subject_map:
+                    existing  = subject_map[subj_key]
+                    old_count = existing["message_count"]
+                    if curr_count <= old_count:
+                        if not dry_run:
+                            # Use col_letter() — not hardcoded "O"/"N"
+                            sheets_svc.spreadsheets().values().batchUpdate(
+                                spreadsheetId=SHEET_ID,
+                                body={"valueInputOption": "RAW", "data": [
+                                    {"range": f"'{SHEET_TAB}'!{col_letter('Thread ID')}{existing['sheet_row']}",
+                                     "values": [[tid]]},
+                                    {"range": f"'{SHEET_TAB}'!{col_letter('Thread Messages')}{existing['sheet_row']}",
+                                     "values": [[str(curr_count)]]},
+                                ]}
+                            ).execute()
+                        skipped    += 1
+                        backfilled += 1
+                        status_msg  = f"⏭️ TID stored: {meta_subj[:40]}"
+                    else:
+                        row_data = process_thread(gmail_svc, tid, vendor_db)
+                        if row_data:
+                            update_existing_row(sheets_svc, existing["sheet_row"], row_data, backfill_tid=True)
+                            thread_map[tid] = existing
+                            thread_map[tid]["message_count"] = row_data["Thread Messages"]
+                            updated    += 1
+                            backfilled += 1
+                            status_msg  = f"🔄 Updated + TID: {row_data['Subject'][:40]}"
+
+                # ── CASE 3: Brand new thread ──
+                else:
+                    if curr_count < 2:
+                        skipped   += 1
+                        status_msg = f"⏭️ Single msg: {meta_subj[:40]}"
+                    else:
+                        row_data = process_thread(gmail_svc, tid, vendor_db)
+                        if row_data is None:
+                            skipped   += 1
+                            status_msg = f"⏭️ No body: {meta_subj[:40]}"
+                        else:
+                            # ✅ Use _build_new_row — all 24 cols, no hardcoded list
+                            new_rows.append(_build_new_row(row_data, now_str))
+                            subject_map[row_data["Subject"].lower()] = {
+                                "sheet_row": None, "message_count": curr_count,
+                                "thread_id": tid,  "subject": row_data["Subject"],
+                            }
+                            added     += 1
+                            status_msg = f"🆕 Added: {row_data['Subject'][:40]}"
+
+            except Exception as exc:
+                errors += 1
+                record_error(tid, meta_subj, "streamlit_sync", exc)
+                status_msg = f"❌ Error: {meta_subj[:40]} — {str(exc)[:60]}"
+
+            log_lines.append(status_msg)
+            # Show last 8 log lines live
+            if i % 3 == 0 or i == total:
+                status_area.code("\n".join(log_lines[-8:]), language=None)
+
+        # ── Final writes ──
+        if not dry_run:
+            if new_rows:
+                append_new_rows(sheets_svc, new_rows)
+            flush_error_log(sheets_svc)
+
+        cs = cache_stats()
+        write_audit_log({
+            "threads_fetched": total,
+            "added":           added,
+            "updated":         updated,
+            "backfilled":      backfilled,
+            "skipped":         skipped,
+            "errors":          errors,
+            "cache_entries":   cs.get("cached_entries", 0),
+        })
+
+        progress_bar.empty()
+        status_area.empty()
+
+        if dry_run:
+            st.info("🔍 DRY RUN — no data was written to Google Sheets.")
+        else:
+            st.success("✅ Sync Complete!")
+            st.balloons()
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("🆕 Added",   added)
+        m2.metric("🔄 Updated", updated)
+        m3.metric("🔗 Backfilled", backfilled)
+        m4.metric("⏭️ Skipped",  skipped)
+        m5.metric("❌ Errors",   errors)
+
+        # Force dashboard refresh
+        st.session_state.df_logs = None
+
+
+# ════════════════════════════════════════════════════════════
+# PAGE: THREAD VIEWER
+# ════════════════════════════════════════════════════════════
+elif page == "🗂️ Thread Viewer":
+    st.title("🗂️ Thread Viewer")
+
+    df = st.session_state.df_logs if st.session_state.df_logs is not None else load_data_from_sheets()
+
+    if df.empty:
+        st.info("No data found. Run a sync first.")
+        st.stop()
+
+    # ── Filters ──────────────────────────────────────────────
+    st.subheader("Filters")
+    f1, f2, f3, f4, f5 = st.columns(5)
+
+    with f1:
+        intent_opts = ["All"] + sorted(df["Intent"].dropna().unique().tolist()) if "Intent" in df.columns else ["All"]
+        intent_f    = st.selectbox("Intent", intent_opts)
+
+    with f2:
+        reply_f = st.selectbox("Reply Needed", ["All", "Yes", "No"])
+
+    with f3:
+        vendor_opts = ["All"] + sorted(df[df.get("Vendor Name", pd.Series()) != ""]["Vendor Name"].dropna().unique().tolist()) if "Vendor Name" in df.columns else ["All"]
+        vendor_f    = st.selectbox("Vendor", vendor_opts)
+
+    with f4:
+        div_opts = ["All"] + sorted(df["Division"].dropna().unique().tolist()) if "Division" in df.columns else ["All"]
+        div_f    = st.selectbox("Division", div_opts)
+
+    with f5:
+        sample_opts = ["All"] + sorted(df["Sample Status"].dropna().unique().tolist()) if "Sample Status" in df.columns else ["All"]
+        sample_f    = st.selectbox("Sample Status", sample_opts)
+
+    fdf = df.copy()
+    if intent_f  != "All" and "Intent"        in fdf.columns: fdf = fdf[fdf["Intent"]        == intent_f]
+    if reply_f   != "All" and "Reply Needed"  in fdf.columns: fdf = fdf[fdf["Reply Needed"]  == reply_f]
+    if vendor_f  != "All" and "Vendor Name"   in fdf.columns: fdf = fdf[fdf["Vendor Name"]   == vendor_f]
+    if div_f     != "All" and "Division"      in fdf.columns: fdf = fdf[fdf["Division"]      == div_f]
+    if sample_f  != "All" and "Sample Status" in fdf.columns: fdf = fdf[fdf["Sample Status"] == sample_f]
+
+    st.caption(f"Showing **{len(fdf)}** of **{len(df)}** threads")
+    st.divider()
+
+    # ── Thread cards ─────────────────────────────────────────
+    for idx, row in fdf.iterrows():
+        vendor  = row.get("Vendor Name", "Unknown Vendor") or "Unknown Vendor"
+        subject = row.get("Subject",     "No Subject")     or "No Subject"
+        sent    = row.get("Sent Date",   "")               or ""
+        intent  = row.get("Intent",      "")               or ""
+
+        label = f"{'⚠️ ' if str(row.get('Sample Reminder','')).startswith('⚠️') else ''}{sent[:10]}  |  {vendor}  |  {subject[:60]}"
+
+        with st.expander(label):
+            # ── Row 1: metadata badges ──
+            badge_html = _intent_badge(intent) if intent else ""
+            rn = row.get("Reply Needed", "No")
+            rn_html = ('<span class="badge badge-chase">⚠️ Reply Needed</span>'
+                       if rn == "Yes" else
+                       '<span class="badge badge-sample">✅ No Reply</span>')
+            st.markdown(f"{badge_html} &nbsp; {rn_html}", unsafe_allow_html=True)
+            st.markdown("")
+
+            # ── Main 3-column layout ──
+            left, mid, right = st.columns([3, 2, 2])
+
+            with left:
+                st.markdown("**AI Overview**")
+                overview = row.get("AI Overview", "") or ""
+                for line in overview.split("\n"):
+                    if line.strip():
+                        st.markdown(line)
+
+                reminder = row.get("Sample Reminder", "") or ""
+                if reminder.startswith("⚠️"):
+                    st.warning(reminder)
+
+            with mid:
+                st.markdown("**Thread Details**")
+                details = {
+                    "Division":    row.get("Division", ""),
+                    "Style No":    row.get("Style No", ""),
+                    "Colour":      row.get("Colour", ""),
+                    "PO Number":   row.get("PO Number", ""),
+                    "Sender":      row.get("Sender", ""),
+                    "CC":          row.get("CC", ""),
+                    "Messages":    row.get("Thread Messages", ""),
+                    "Sent Date":   sent,
+                    "Last Updated":row.get("Last Updated", ""),
+                }
+                for k, v in details.items():
+                    if v:
+                        st.text(f"{k}: {v}")
+
+                st.markdown("**Vendor**")
+                st.text(f"Name:  {row.get('Vendor Name', '')}")
+                st.text(f"Class: {row.get('Partner Classification', '')}")
+
+            with right:
+                st.markdown("**Shipment**")
+                awb      = row.get("AWB No", "")           or ""
+                carrier  = row.get("Shipment Company", "") or ""
+                ship_dt  = row.get("Shipment Date", "")    or ""
+                if awb or carrier:
+                    st.success(f"📦 {carrier}  {awb}")
+                    if ship_dt:
+                        st.caption(f"Shipped: {ship_dt}")
+                else:
+                    st.caption("No shipment info")
+
+                st.markdown("**Sample**")
+                ss = row.get("Sample Status", "None") or "None"
+                ss_color = {
+                    "Dispatched": "🟡", "Received": "🟢", "Approved": "✅",
+                    "Rejected": "🔴", "Pending": "🟠", "None": "⚪"
+                }.get(ss, "⚪")
+                st.markdown(f"{ss_color} {ss}")
+
+                attachments = row.get("Attachments", "") or ""
+                links       = row.get("Shared Links", "") or ""
+                if attachments:
+                    st.markdown("**Attachments**")
+                    st.caption(attachments)
+                if links:
+                    st.markdown("**Shared Links**")
+                    st.caption(links)
+
+            # ── Reply Draft — full width below columns ───────
+            reply_draft = row.get("Reply Draft", "") or ""
+            if reply_draft:
+                st.markdown("---")
+                st.markdown("**✉️ Reply Draft**")
+                st.markdown(
+                    f'<div class="reply-box">{reply_draft}</div>',
+                    unsafe_allow_html=True
+                )
+                st.download_button(
+                    label="📋 Copy / Download reply",
+                    data=reply_draft,
+                    file_name=f"reply_{subject[:30].replace(' ','_')}.txt",
+                    mime="text/plain",
+                    key=f"dl_{idx}",
+                )
+            else:
+                st.markdown("---")
+                st.caption("No reply draft — thread may not require a reply.")
