@@ -952,10 +952,20 @@ if page == "Dashboard":
 
     if "Vendor Name" in df.columns:
         top_v = df[df["Vendor Name"].replace("", pd.NA).notna()]["Vendor Name"].value_counts()
-        tv    = top_v.index[0] if not top_v.empty else "—"
-        k6.metric("Top Vendor", tv,
-                  delta=f"{top_v.iloc[0]} threads" if not top_v.empty else "",
-                  help=tv)
+        tv      = top_v.index[0] if not top_v.empty else "—"
+        tv_ct   = int(top_v.iloc[0]) if not top_v.empty else 0
+        k6.markdown(f"""
+        <div style="background:var(--ink-card);border:1px solid var(--line);
+                    border-top:2px solid var(--t3);border-radius:var(--r-lg);
+                    padding:20px 22px;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:0.1em;
+                        text-transform:uppercase;color:var(--t3);margin-bottom:8px;
+                        font-family:'Instrument Sans',sans-serif;">Top Vendor</div>
+            <div style="font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;
+                        color:var(--t1);line-height:1.25;word-break:break-word;">{tv}</div>
+            <div style="font-size:12px;color:var(--t3);margin-top:6px;">{tv_ct} threads</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -979,25 +989,81 @@ if page == "Dashboard":
             st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Charts ────────────────────────────────────────────────────────────────
+    import plotly.graph_objects as go
+
+    _chart_layout = dict(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=16, t=8, b=8),
+        font=dict(family="Instrument Sans, sans-serif", color="#8A8AA8", size=11),
+        xaxis=dict(
+            showgrid=True, gridcolor="#232330", gridwidth=0.5,
+            zeroline=False, showline=False, tickfont=dict(size=11, color="#8A8AA8"),
+        ),
+        yaxis=dict(
+            showgrid=False, zeroline=False, showline=False,
+            tickfont=dict(size=11, color="#F4F4F8"), automargin=True,
+        ),
+        bargap=0.35,
+        hoverlabel=dict(
+            bgcolor="#16161C", bordercolor="#32324A",
+            font=dict(family="JetBrains Mono, monospace", size=11, color="#F4F4F8"),
+        ),
+    )
+
+    def _hbar(labels, values, color, title_col):
+        # Sort ascending so largest is at top
+        pairs  = sorted(zip(labels, values), key=lambda x: x[1])
+        xlbls  = [p[0] for p in pairs]
+        xvals  = [p[1] for p in pairs]
+        height = max(180, len(xlbls) * 38 + 40)
+        fig = go.Figure(go.Bar(
+            x=xvals, y=xlbls,
+            orientation="h",
+            marker=dict(
+                color=color,
+                opacity=0.85,
+                line=dict(width=0),
+            ),
+            hovertemplate="<b>%{y}</b><br>%{x} threads<extra></extra>",
+            text=xvals,
+            textposition="outside",
+            textfont=dict(size=11, color="#8A8AA8", family="JetBrains Mono, monospace"),
+            cliponaxis=False,
+        ))
+        layout = dict(**_chart_layout)
+        layout["height"] = height
+        fig.update_layout(**layout)
+        return fig
+
     ca, cb, cc = st.columns(3)
     with ca:
         st.markdown('<div class="sec-title">Intent Breakdown</div>', unsafe_allow_html=True)
         if "Intent" in df.columns:
             ic = df["Intent"].value_counts().reset_index()
             ic.columns = ["Intent", "Count"]
-            st.bar_chart(ic.set_index("Intent"), color="#C8FF00", height=240)
+            st.plotly_chart(
+                _hbar(ic["Intent"].tolist(), ic["Count"].tolist(), "#C8FF00", ca),
+                use_container_width=True, config={"displayModeBar": False}
+            )
     with cb:
         st.markdown('<div class="sec-title">By Division</div>', unsafe_allow_html=True)
         if "Division" in df.columns:
             dc = df["Division"].value_counts().reset_index()
             dc.columns = ["Division", "Count"]
-            st.bar_chart(dc.set_index("Division"), color="#00E5FF", height=240)
+            st.plotly_chart(
+                _hbar(dc["Division"].tolist(), dc["Count"].tolist(), "#00E5FF", cb),
+                use_container_width=True, config={"displayModeBar": False}
+            )
     with cc:
         st.markdown('<div class="sec-title">Sample Pipeline</div>', unsafe_allow_html=True)
         if "Sample Status" in df.columns:
             sc = df["Sample Status"].value_counts().reset_index()
             sc.columns = ["Status", "Count"]
-            st.bar_chart(sc.set_index("Status"), color="#FFB800", height=240)
+            st.plotly_chart(
+                _hbar(sc["Status"].tolist(), sc["Count"].tolist(), "#FFB800", cc),
+                use_container_width=True, config={"displayModeBar": False}
+            )
 
     st.divider()
 
