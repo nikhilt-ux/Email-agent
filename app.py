@@ -644,11 +644,18 @@ if "Dashboard" in page:
     k4.metric("Threads with PO", po_ct)
 
     dispatched = int((df.get("Sample Status", pd.Series(dtype=str)) == "Dispatched").sum())
-    if k5.button(
-        f"📦 Dispatched Samples\n### {dispatched}",
-        use_container_width=True,
-        help="Click to view all dispatched sample threads in Thread Viewer",
-    ):
+    k5.metric("Dispatched Samples", dispatched)
+    # Small "view" link below the metric — styled as an unobtrusive link
+    k5.markdown("""<style>
+        div[data-testid="column"]:nth-child(5) button[kind="secondary"] {
+            background: none !important; border: none !important;
+            color: #3DFFD0 !important; font-size: 11px !important;
+            padding: 0 !important; margin-top: -6px !important;
+            text-decoration: underline !important; cursor: pointer !important;
+            box-shadow: none !important;
+        }
+    </style>""", unsafe_allow_html=True)
+    if k5.button("↗ View threads", key="dispatched_jump", use_container_width=False):
         st.session_state.jump_to_viewer     = True
         st.session_state.jump_sample_filter = "Dispatched"
         st.rerun()
