@@ -567,8 +567,19 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    page = st.radio("", ["📊  Dashboard", "🔄  Sync Gmail", "🗂️  Thread Viewer"],
+    # Jump navigation — set by clickable dashboard metrics
+    if "jump_to_viewer" not in st.session_state:
+        st.session_state.jump_to_viewer  = False
+    if "jump_sample_filter" not in st.session_state:
+        st.session_state.jump_sample_filter = "All"
+
+    _page_options = ["📊  Dashboard", "🔄  Sync Gmail", "🗂️  Thread Viewer"]
+    _default_page = 2 if st.session_state.jump_to_viewer else 0
+    page = st.radio("", _page_options, index=_default_page,
                     label_visibility="collapsed")
+    # Clear jump flag once page radio has consumed it
+    if st.session_state.jump_to_viewer and "Thread Viewer" in page:
+        st.session_state.jump_to_viewer = False
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<p style="font-size:10px;color:#5A6A8A;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;margin-bottom:8px;">Quick Actions</p>', unsafe_allow_html=True)
@@ -633,7 +644,14 @@ if "Dashboard" in page:
     k4.metric("Threads with PO", po_ct)
 
     dispatched = int((df.get("Sample Status", pd.Series(dtype=str)) == "Dispatched").sum())
-    k5.metric("Dispatched Samples", dispatched)
+    if k5.button(
+        f"📦 Dispatched Samples\n### {dispatched}",
+        use_container_width=True,
+        help="Click to view all dispatched sample threads in Thread Viewer",
+    ):
+        st.session_state.jump_to_viewer     = True
+        st.session_state.jump_sample_filter = "Dispatched"
+        st.rerun()
 
     if "Vendor Name" in df.columns:
         top_v = df[df["Vendor Name"].replace("", pd.NA).notna()]["Vendor Name"].value_counts()
@@ -928,7 +946,13 @@ elif "Thread" in page:
     with fb: reply_f  = st.selectbox("Reply Needed",  ["All", "Yes", "No"])
     with fc: vendor_f = st.selectbox("Vendor",        _opts(df, "Vendor Name"))
     with fd: div_f    = st.selectbox("Division",      _opts(df, "Division"))
-    with fe: sample_f = st.selectbox("Sample Status", _opts(df, "Sample Status"))
+    # Pre-select from jump navigation if set
+    _sample_opts    = _opts(df, "Sample Status")
+    _jump_sample    = st.session_state.get("jump_sample_filter", "All")
+    _sample_default = _sample_opts.index(_jump_sample) if _jump_sample in _sample_opts else 0
+    with fe: sample_f = st.selectbox("Sample Status", _sample_opts, index=_sample_default)
+    # Consume the jump so it doesn't persist on next page switch
+    st.session_state.jump_sample_filter = "All"
     st.markdown("</div>", unsafe_allow_html=True)
 
     fdf = df.copy()
