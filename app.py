@@ -578,11 +578,20 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
     cs = cache_stats()
+    from gmail_reader import _run_token_usage
+    _tok_in  = _run_token_usage.get("prompt_tokens", 0)
+    _tok_out = _run_token_usage.get("completion_tokens", 0)
+    _tok_total = _tok_in + _tok_out
+    _tok_str = f"{_tok_total:,}" if _tok_total else "—"
     st.markdown(f"""
     <div class="sys-card">
         <div class="sys-label">System Status</div>
         <div style="color:#9BAAC8;margin-bottom:5px;">
             💾 <b style="color:#3DFFD0">{cs.get('cached_entries', 0)}</b> cached threads
+        </div>
+        <div style="color:#9BAAC8;margin-bottom:5px;">
+            🔢 <b style="color:#FFD166">{_tok_str}</b> tokens this run
+            <span style="font-size:11px;color:#5A6785;">({_tok_in:,} in / {_tok_out:,} out)</span>
         </div>
         <div style="color:#9BAAC8;">
             🤖 <b style="color:#B76EFF">GPT-5.4</b> active
@@ -628,9 +637,13 @@ if "Dashboard" in page:
 
     if "Vendor Name" in df.columns:
         top_v = df[df["Vendor Name"].replace("", pd.NA).notna()]["Vendor Name"].value_counts()
-        k6.metric("Top Vendor",
-                  top_v.index[0] if not top_v.empty else "—",
-                  delta=f"{top_v.iloc[0]} threads" if not top_v.empty else "")
+        top_vendor_full = top_v.index[0] if not top_v.empty else "—"
+        k6.metric(
+            "Top Vendor",
+            top_vendor_full,
+            delta=f"{top_v.iloc[0]} threads" if not top_v.empty else "",
+            help=top_vendor_full,   # hover tooltip shows full name even if truncated
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 

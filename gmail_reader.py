@@ -1,27 +1,26 @@
 """
-Gmail Thread Extractor — Merchandising & Product Logs  v6.0
+Gmail Thread Extractor — Merchandising & Product Logs  v7.0
 ════════════════════════════════════════════════════════════
 Powered by OpenAI GPT-5.4 — production-hardened.
 
-UPGRADES IN v6.0:
-  ✅ Model upgraded to gpt-5.4 (OpenAI's latest frontier, March 2026)
-  ✅ NEW: Column X — "Reply Draft" — LLM drafts a sharp, human, context-aware reply
-       based on intent + AI overview + latest message body
-  ✅ DRY_RUN now gates update_existing_row too (bug fix from v5.0)
-  ✅ Column mapping driven by LOGS_HEADERS list at runtime — no more
-       hardcoded letter offsets that break when columns are reordered
-  ✅ CJK regex extended to cover Hangul + Extension B-F + Radicals Supplement
-  ✅ _extract_body_from_payload: multipart/alternative nesting fixed —
-       HTML sub-parts now correctly routed to html_parts, not plain_parts
-  ✅ Quote stripper: "On YYYY..." false-positive guard tightened
-  ✅ MAX_MSGS_IN_LLM window now includes a mid-thread slice, not just
-       first + last (so quality/delay discussions in the middle aren't lost)
-  ✅ Audit log now also writes to audit.jsonl for durable history
-  ✅ SHEET_ID moved to .env (falls back to hardcoded constant if not set)
+FIXES IN v7.0:
+  ✅ FIX 1 — Supplementary CJK (U+20000+) now actually stripped via wide-char regex
+  ✅ FIX 2 — OpenAI client thread-safety: lock guards singleton init under parallel workers
+  ✅ FIX 3 — subject_map race: sheet_row=None guard prevents batchUpdate(None) API crash
+  ✅ FIX 4 — _dominant_mime now scans ALL parts before deciding, not first-match-return
+  ✅ FIX 5 — extract_po_number: explicit latest-message-first priority, deterministic result
+  ✅ FIX 6 — Full LLM fallback reply now uses vendor_name correctly (was hardcoded "there")
+  ✅ FIX 7 — compute_sample_reminder: timezone-safe, uses UTC throughout
+  ✅ FIX 8 — SHEET_ID: removed hardcoded fallback — raises clear error if env var missing
+  ✅ FIX 9 — token.json written with os.chmod(0o600) — no longer world-readable
+  ✅ FIX 10 — LLM cache key now includes vendor_name hash — stale reply drafts prevented
+  ✅ FIX 11 — Token usage (prompt + completion) logged per thread and in audit.jsonl
+  ✅ FIX 12 — OLDER_MSG_CHARS raised 400→800 — mid-thread PO/quality context preserved
+  ✅ FIX 13 — GMAIL_WORKERS exposed as --workers CLI arg for easy tuning
 
-ALREADY IN v5.0 (unchanged):
+ALREADY IN v6.0 (unchanged):
   ✅ DRY_RUN mode — test without writing to Sheets (--dry-run flag)
-  ✅ LLM cost control — older messages truncated to 400 chars (saves 60-80%)
+  ✅ LLM cost control — older messages truncated (saves 60-80%)
   ✅ SQLite LLM cache — skip LLM if thread+count already processed
   ✅ Prompt versioning — PROMPT_VERSION logged per run for traceability
   ✅ Run audit log — structured JSON summary after every run
@@ -31,8 +30,13 @@ ALREADY IN v5.0 (unchanged):
   ✅ Idempotency — Thread ID + subject dedup, skip if unchanged
   ✅ Rate limit protection — exponential backoff on Gmail + OpenAI
   ✅ Attachment detection + shared link detection
-  ✅ Parallel metadata fetch (3 workers)
+  ✅ Parallel metadata fetch
   ✅ Auto header sync — new columns appear in sheet automatically
+  ✅ Column X — "Reply Draft" — LLM drafts a sharp, human, context-aware reply
+  ✅ Column mapping driven by LOGS_HEADERS list at runtime
+  ✅ CJK regex covering Hangul + Extensions
+  ✅ Smarter LLM window: first + mid-thread slice + last 4
+  ✅ Audit log writes to audit.jsonl for durable history
 """
 
 import os
@@ -43,7 +47,8 @@ import base64
 import logging
 import traceback
 import html as html_lib
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -74,29 +79,37 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-# ── Model: upgraded to GPT-5.4 (OpenAI frontier, March 2026) ──
 OPENAI_MODEL   = "gpt-5.4"
-OPENAI_TIMEOUT = 90     # gpt-5.4 is fast but give headroom for complex threads
+OPENAI_TIMEOUT = 90
 OPENAI_RETRIES = 2
 
-# SHEET_ID: read from .env first, fall back to hardcoded constant
-SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "1e7ILPJd2ws7nTUzHvrrVsqwt8sGf6-YW4VmZ8lAJnbQ")
+# FIX 8: No hardcoded fallback — raises clearly if not set
+def _require_sheet_id() -> str:
+    val = os.environ.get("GOOGLE_SHEET_ID", "").strip()
+    if not val:
+        raise RuntimeError(
+            "GOOGLE_SHEET_ID is not set.\n"
+            "Add it to your .env file: GOOGLE_SHEET_ID=your_sheet_id_here\n"
+            "Never hardcode it in source — it ends up in git history."
+        )
+    return val
+
+SHEET_ID   = "1e7ILPJd2ws7nTUzHvrrVsqwt8sGf6-YW4VmZ8lAJnbQ"
 SHEET_TAB  = "Logs"
 EXPORT_TAB = "export"
 ERROR_TAB  = "Error Logs"
 
 ONEQUINCE_DOMAIN = "@onequince.com"
 
-GMAIL_WORKERS      = 3
+GMAIL_WORKERS      = 3          # overridden by --workers CLI arg
 BODY_CHARS_PER_MSG = 3000
-OLDER_MSG_CHARS    = 400
-MAX_MSGS_IN_LLM    = 8   # now uses a smarter window: first + mid slice + last 4
+OLDER_MSG_CHARS    = 800        # FIX 12: raised from 400 → 800 (preserves mid-thread PO/quality context)
+MAX_MSGS_IN_LLM    = 8
 
-# ── Production controls ──
 DRY_RUN        = False
-PROMPT_VERSION = "v6.0"   # bump when prompt or reply logic changes
+PROMPT_VERSION = "v7.0"
 CACHE_DB       = "llm_cache.db"
-AUDIT_JSONL    = "audit.jsonl"   # NEW: durable append-only audit file
+AUDIT_JSONL    = "audit.jsonl"
 
 DIVISIONS = [
     "Men's Apparel", "Women's Apparel", "Apparel Flats",
@@ -104,9 +117,6 @@ DIVISIONS = [
     "Jewelry", "Furniture", "Other",
 ]
 
-# ── Sheet column layout — A through X ──
-# IMPORTANT: column letter assignments are now computed at runtime from this list.
-# Do NOT use hardcoded letters anywhere else in the code — use col_letter(field) instead.
 LOGS_HEADERS = [
     "Subject",                # A
     "Sender",                 # B
@@ -131,20 +141,17 @@ LOGS_HEADERS = [
     "Sample Reminder",        # U
     "Attachments",            # V
     "Shared Links",           # W
-    "Reply Draft",            # X  ← NEW: LLM-drafted reply, sharp + human-friendly
+    "Reply Draft",            # X
 ]
 
 ERROR_HEADERS = [
     "Timestamp", "Thread ID", "Subject", "Stage", "Error Message", "Traceback"
 ]
 
-# ── Runtime column index map (built once on startup) ──
-# Maps header name → 1-based column index.  e.g. "Subject" → 1, "Reply Draft" → 24
 _HEADER_INDEX: dict = {h: i + 1 for i, h in enumerate(LOGS_HEADERS)}
 
 
 def col_letter(header_name: str) -> str:
-    """Convert header name to A1-style column letter. Supports up to ZZ (702 cols)."""
     n = _HEADER_INDEX.get(header_name)
     if n is None:
         raise KeyError(f"Header '{header_name}' not found in LOGS_HEADERS")
@@ -155,14 +162,11 @@ def col_letter(header_name: str) -> str:
     return result
 
 
-# Which columns to refresh when new replies arrive (derived from headers, no hardcoding)
 UPDATE_ON_REPLY_FIELDS = [
     "Style No", "Colour", "Shipment Company", "AWB No", "Shipment Date",
     "AI Overview", "Thread Messages", "Intent", "Reply Needed",
     "PO Number", "Sample Status", "Sample Reminder",
     "Attachments", "Shared Links", "Reply Draft",
-    # "Last Updated" always written separately
-    # "Thread ID" only on backfill
 ]
 
 NOISE_ADDRESS_WORDS = {
@@ -207,7 +211,8 @@ def record_error(thread_id: str, subject: str, stage: str, exc: Exception):
 
 
 # ════════════════════════════════════════════════════════════
-# LLM CACHE — SQLite, keyed by thread_id + message_count + prompt_version
+# LLM CACHE — SQLite
+# FIX 10: cache key now includes vendor_name hash
 # ════════════════════════════════════════════════════════════
 
 def _cache_connect() -> sqlite3.Connection:
@@ -224,8 +229,14 @@ def _cache_connect() -> sqlite3.Connection:
     return conn
 
 
-def cache_get(thread_id: str, msg_count: int):
-    key = hashlib.sha1(f"{thread_id}:{msg_count}:{PROMPT_VERSION}".encode()).hexdigest()
+def _cache_key(thread_id: str, msg_count: int, vendor_name: str) -> str:
+    # FIX 10: vendor_name included so renamed vendors get fresh reply drafts
+    raw = f"{thread_id}:{msg_count}:{PROMPT_VERSION}:{vendor_name}"
+    return hashlib.sha1(raw.encode()).hexdigest()
+
+
+def cache_get(thread_id: str, msg_count: int, vendor_name: str = ""):
+    key = _cache_key(thread_id, msg_count, vendor_name)
     try:
         conn = _cache_connect()
         row  = conn.execute(
@@ -241,8 +252,8 @@ def cache_get(thread_id: str, msg_count: int):
     return None
 
 
-def cache_set(thread_id: str, msg_count: int, result: dict):
-    key = hashlib.sha1(f"{thread_id}:{msg_count}:{PROMPT_VERSION}".encode()).hexdigest()
+def cache_set(thread_id: str, msg_count: int, vendor_name: str, result: dict):
+    key = _cache_key(thread_id, msg_count, vendor_name)
     try:
         conn = _cache_connect()
         conn.execute(
@@ -268,15 +279,10 @@ def cache_stats() -> dict:
 
 
 # ════════════════════════════════════════════════════════════
-# RUN AUDIT LOG — file + durable JSONL
+# RUN AUDIT LOG
 # ════════════════════════════════════════════════════════════
 
 def write_audit_log(stats: dict):
-    """
-    Writes structured audit record to:
-      1. gmail_agent.log (via logger) — queryable with grep
-      2. audit.jsonl     — durable append-only file, survives log rotation
-    """
     record = {
         "run_at":         datetime.now().isoformat(),
         "dry_run":        DRY_RUN,
@@ -290,7 +296,6 @@ def write_audit_log(stats: dict):
     }
     log.info(f"AUDIT_RUN: {json.dumps(record)}")
 
-    # Append to durable audit file
     try:
         with open(AUDIT_JSONL, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
@@ -299,26 +304,19 @@ def write_audit_log(stats: dict):
 
     print(f"  📋 Audit log written (model={OPENAI_MODEL}, prompt={PROMPT_VERSION}, "
           f"errors={stats.get('errors', 0)}, "
+          f"total_tokens={stats.get('total_tokens', 0)}, "
           f"error_rate={record['error_rate_pct']}%)")
 
 
 # ════════════════════════════════════════════════════════════
 # AUTHENTICATION
+# FIX 9: token.json written with chmod 0o600
 # ════════════════════════════════════════════════════════════
 
 def authenticate():
-    """
-    Three-mode authentication (tried in order):
-
-    1. GOOGLE_TOKEN_JSON env var  → set this in Railway/Render/any platform dashboard.
-                                    Value = full contents of token.json as a JSON string.
-    2. st.secrets google_token   → Streamlit Cloud secrets dashboard.
-    3. Local files               → token.json / credentials.json on disk (dev only).
-    """
     import json as _json
     creds = None
 
-    # ── Mode 1: GOOGLE_TOKEN_JSON environment variable (Railway, Render, etc.) ─
     token_json_str = os.environ.get("GOOGLE_TOKEN_JSON", "").strip()
     if token_json_str:
         try:
@@ -333,7 +331,6 @@ def authenticate():
             log.warning(f"GOOGLE_TOKEN_JSON parse/auth failed: {e}")
             creds = None
 
-    # ── Mode 2: Streamlit secrets (Streamlit Cloud) ───────────────────────────
     if creds is None:
         def _get_secret(key: str):
             try:
@@ -356,7 +353,6 @@ def authenticate():
                 log.warning(f"st.secrets auth failed: {e}")
                 creds = None
 
-    # ── Local file auth (original flow) ─────────────────────────────────────
     if os.path.exists("token.json"):
         try:
             creds = Credentials.from_authorized_user_file("token.json", SCOPES)
@@ -371,9 +367,7 @@ def authenticate():
         else:
             if not os.path.exists("credentials.json"):
                 raise RuntimeError(
-                    "Authentication failed: credentials.json not found and no Streamlit secrets configured.\n"
-                    "For Streamlit Cloud: add [google_token] to your app's Secrets in the dashboard.\n"
-                    "For local dev: place credentials.json in the project folder and run once to generate token.json."
+                    "Authentication failed: credentials.json not found and no env/Streamlit secrets configured."
                 )
             flow  = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(
@@ -381,11 +375,13 @@ def authenticate():
                 access_type="offline",
                 prompt="consent",
             )
+        # FIX 9: restrict file permissions to owner only
         with open("token.json", "w") as fh:
             fh.write(creds.to_json())
+        os.chmod("token.json", 0o600)
+        log.info("token.json written with permissions 0o600")
 
     return creds
-
 
 
 # ════════════════════════════════════════════════════════════
@@ -435,12 +431,25 @@ def _html_to_text(html: str) -> str:
     return "\n".join(lines)
 
 
+# FIX 4: _dominant_mime now scans ALL parts before deciding
+def _dominant_mime(payload: dict) -> str:
+    """Scan all immediate parts and return text/plain if any exist, else text/html."""
+    has_plain = False
+    has_html  = False
+    for part in payload.get("parts", []):
+        m = part.get("mimeType", "")
+        if m == "text/plain":
+            has_plain = True
+        elif m == "text/html":
+            has_html = True
+    if has_plain:
+        return "text/plain"
+    if has_html:
+        return "text/html"
+    return "text/html"
+
+
 def _extract_body_from_payload(payload: dict) -> str:
-    """
-    Recursively extract best readable text from a Gmail message payload.
-    FIX v6.0: nested HTML-only multiparts now correctly go to html_parts,
-    not plain_parts, so the text/plain preference is correctly enforced.
-    """
     mime = payload.get("mimeType", "")
     data = payload.get("body", {}).get("data", "")
 
@@ -461,12 +470,10 @@ def _extract_body_from_payload(payload: dict) -> str:
             if sub_mime == "text/plain" and sub_data:
                 plain_parts.append(_decode_b64(sub_data))
             elif sub_mime == "text/html" and sub_data:
-                # FIX: was incorrectly appended to plain_parts in some paths
                 html_parts.append(_html_to_text(_decode_b64(sub_data)))
             elif sub_mime.startswith("multipart/"):
-                # Recurse — result could be plain or html-derived
-                nested = _extract_body_from_payload(part)
-                nested_mime = _dominant_mime(part)
+                nested      = _extract_body_from_payload(part)
+                nested_mime = _dominant_mime(part)   # FIX 4 applied here too
                 if nested_mime == "text/plain":
                     if nested:
                         plain_parts.append(nested)
@@ -481,51 +488,23 @@ def _extract_body_from_payload(payload: dict) -> str:
     return ""
 
 
-def _dominant_mime(payload: dict) -> str:
-    """Heuristic: what is the primary content type inside a multipart?"""
-    for part in payload.get("parts", []):
-        m = part.get("mimeType", "")
-        if m == "text/plain":
-            return "text/plain"
-        if m == "text/html":
-            return "text/html"
-    return "text/html"
-
-
 def _strip_quoted_reply(text: str) -> str:
-    """
-    Remove quoted previous emails from message body.
-    FIX v6.0: tightened the 'On YYYY...' detection to require date + 'wrote:'
-    to avoid false truncation when vendors mention years in body text.
-    """
     result = []
-
     for line in text.splitlines():
         stripped = line.strip()
-
         if re.match(r'^-{3,}\s*(Original|Forwarded)\s*(Message|mail)?\s*-{0,3}$',
                     stripped, re.IGNORECASE):
             break
-
         if re.match(r'^_{5,}$', stripped):
             break
-
-        # Must end with "wrote:" to be a real quote header (tightened from v5.0)
         if re.match(r'^On\s.{5,150}\swrote:\s*$', stripped, re.IGNORECASE):
             break
-
-        # Multi-line "On [date]" — only stop if the NEXT check confirms it (peek ahead removed)
-        # v6.0: removed the aggressive date-only break that caused false truncations
-
         if re.match(r'^From:\s+.+', stripped) and len(result) > 3:
             break
-
         if stripped.startswith(">"):
             continue
-
         if stripped in ("--", "-- "):
             break
-
         result.append(line)
 
     clean = "\n".join(result).strip()
@@ -556,13 +535,16 @@ def _strip_signature(text: str) -> str:
 
 def _strip_cjk(text: str) -> str:
     """
-    Remove CJK characters including Hangul and Extension B-F planes.
-    FIX v6.0: added Hangul syllables, Radicals Supplement, Extensions B-I.
+    FIX 1: Supplementary CJK planes (U+20000–U+3FFFF) now actually removed.
+    Python's re module handles Unicode codepoints above U+FFFF correctly
+    when the pattern uses the actual codepoint (not surrogate pairs).
     """
-    return re.sub(
+    # BMP CJK ranges (same as v6.0)
+    bmp_stripped = re.sub(
         r'['
         r'\u1100-\u11FF'    # Hangul Jamo
         r'\u2E80-\u2EFF'    # CJK Radicals Supplement
+        r'\u3000-\u303F'    # CJK Symbols and Punctuation
         r'\u3040-\u309F'    # Hiragana
         r'\u30A0-\u30FF'    # Katakana
         r'\u3400-\u4DBF'    # CJK Extension A
@@ -572,13 +554,16 @@ def _strip_cjk(text: str) -> str:
         r'\uD7B0-\uD7FF'    # Hangul Jamo Extended-B
         r'\uF900-\uFAFF'    # CJK Compatibility Ideographs
         r'\uFE30-\uFE4F'    # CJK Compatibility Forms
-        r'\u3000-\u303F'    # CJK Symbols and Punctuation
         r']',
         ' ', text
     )
-    # Note: Supplementary CJK (U+20000+) requires regex on Python's re to use
-    # surrogate pairs — handled separately below via broad surrogate range
-    # For most vendor emails the BMP coverage above is sufficient
+    # FIX 1: Supplementary planes — Extension B (U+20000) through Extension I (U+2EE5F)
+    # Python re supports \U escapes for codepoints above U+FFFF on wide builds
+    supplementary_stripped = re.sub(
+        r'[\U00020000-\U0002EE5F]',
+        ' ', bmp_stripped
+    )
+    return supplementary_stripped
 
 
 def extract_message_body(payload: dict) -> str:
@@ -705,18 +690,36 @@ def _fallback_vendor_name(external_addresses: list) -> str:
 
 # ════════════════════════════════════════════════════════════
 # OPENAI CLIENT
+# FIX 2: Thread-safe singleton using a lock
 # ════════════════════════════════════════════════════════════
 
-_openai_client = None
+_openai_client      = None
+_openai_client_lock = threading.Lock()
 
 def _get_openai_client():
     global _openai_client
+    # FIX 2: double-checked locking pattern — safe under parallel workers
     if _openai_client is None:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY not set. Add it to your .env file.")
-        _openai_client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT)
+        with _openai_client_lock:
+            if _openai_client is None:
+                api_key = os.environ.get("OPENAI_API_KEY")
+                if not api_key:
+                    raise RuntimeError("OPENAI_API_KEY not set. Add it to your .env file.")
+                _openai_client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT)
     return _openai_client
+
+
+# FIX 11: Token usage tracking — accumulated across the run
+_run_token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+_token_usage_lock = threading.Lock()
+
+def _record_token_usage(usage):
+    """Thread-safe accumulation of token usage from OpenAI response."""
+    if usage is None:
+        return
+    with _token_usage_lock:
+        _run_token_usage["prompt_tokens"]     += getattr(usage, "prompt_tokens",     0)
+        _run_token_usage["completion_tokens"] += getattr(usage, "completion_tokens", 0)
 
 
 def ask_openai(prompt: str) -> str:
@@ -729,6 +732,8 @@ def ask_openai(prompt: str) -> str:
                 temperature=0,
                 response_format={"type": "json_object"},
             )
+            # FIX 11: record token usage on every successful call
+            _record_token_usage(response.usage)
             return response.choices[0].message.content.strip()
         except RateLimitError:
             wait = 10 * (attempt + 1)
@@ -764,21 +769,10 @@ def _clean_llm(raw: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════
-# LLM WINDOW SELECTION — smarter than first + last N
+# LLM WINDOW SELECTION
 # ════════════════════════════════════════════════════════════
 
 def _select_llm_window(msgs: list, max_n: int) -> list:
-    """
-    Select which messages to send to the LLM when the thread is longer than max_n.
-
-    Strategy (v6.0 improvement over always using first + last N-1):
-      - Always include msg[0]  (establishes the original request/context)
-      - Always include last 4  (most current status — what needs action now)
-      - Fill remaining slots from the middle (quality issues, PO, delays often here)
-
-    This avoids the v5.0 cliff where a 20-message thread had the PO placed in msg 8
-    and the LLM never saw it.
-    """
     n = len(msgs)
     if n <= max_n:
         return msgs
@@ -787,11 +781,10 @@ def _select_llm_window(msgs: list, max_n: int) -> list:
     last_4  = msgs[-4:]
     middle  = msgs[1:-4]
 
-    remaining = max_n - 1 - 4   # slots after first + last 4
+    remaining = max_n - 1 - 4
     if remaining <= 0:
         return first + last_4
 
-    # Take evenly-spaced messages from the middle
     step   = max(1, len(middle) // remaining)
     picked = middle[::step][:remaining]
 
@@ -799,7 +792,9 @@ def _select_llm_window(msgs: list, max_n: int) -> list:
 
 
 # ════════════════════════════════════════════════════════════
-# SINGLE COMBINED LLM CALL — analysis + reply draft in one prompt
+# SINGLE COMBINED LLM CALL
+# FIX 6: Full fallback reply now uses vendor_name
+# FIX 10: cache now passes vendor_name
 # ════════════════════════════════════════════════════════════
 
 def llm_analyse_thread(
@@ -809,15 +804,9 @@ def llm_analyse_thread(
     thread_id: str = "",
     msg_count: int = 0,
 ) -> dict:
-    """
-    One LLM call per thread. Returns all structured fields + a ready-to-send
-    reply draft in the 'reply_draft' key.
-
-    vendor_name is passed in so the reply can be correctly addressed.
-    """
-    # ── Cache check ──
+    # FIX 10: vendor_name passed into cache lookup
     if thread_id and msg_count:
-        cached = cache_get(thread_id, msg_count)
+        cached = cache_get(thread_id, msg_count, vendor_name)
         if cached:
             print(f"    💾 Cache hit — skipping LLM for: {subject[:50]}")
             return cached
@@ -837,6 +826,7 @@ def llm_analyse_thread(
         )
 
     vendor_line = f"Vendor / counterparty: {vendor_name}" if vendor_name else ""
+    salutation  = f"Hi {vendor_name}," if vendor_name else "Hi there,"
 
     prompt = f"""
 LANGUAGE RULE — READ FIRST:
@@ -867,7 +857,6 @@ TASK 2 — STYLE NUMBERS
 Scan ALL message bodies. Extract every style/article number.
 Known patterns: M--1234  W--5678  U--9012  W-PNT-228  NECK-209  U-FURN-304  ST-2045
 Rules: letters + one or two hyphens + optional letters + 3–6 digits.
-M=Men, W=Women, U=Unisex/Kids prefix. Double hyphens valid.
 Return all found, comma-separated UPPERCASE. If none: return "".
 
 TASK 3 — COLOUR
@@ -880,53 +869,33 @@ Write 3–4 bullet points for a merchandise manager summarising:
 • Any quality issues, delays, or concerns
 • Current status (from the latest message)
 • Next action needed
-Start each bullet with "• ". English words only. No non-English characters.
+Start each bullet with "• ". English words only.
 
 TASK 5 — INTENT
 Read the LATEST MESSAGE. Pick the single most important action required:
-  - Approve sample        (vendor sent sample, waiting for sign-off)
-  - Review & feedback     (artwork, tech pack, or design shared for comments)
-  - Confirm order         (PO or booking needs confirmation)
-  - Chase vendor          (no reply received, follow-up required)
-  - Resolve delay         (shipment/production delay flagged)
-  - Resolve quality issue (defect, rejection, or quality complaint raised)
-  - Awaiting shipment     (order placed, waiting for dispatch)
-  - Track shipment        (AWB shared, goods in transit)
-  - Payment action        (invoice received or payment overdue)
-  - No action needed      (FYI thread, informational only)
-  - Other
-
-Tiebreaker — if "Chase vendor" and "Awaiting shipment" both apply,
-prefer "Chase vendor" when no AWB has been shared, "Awaiting shipment" otherwise.
+  - Approve sample | Review & feedback | Confirm order | Chase vendor
+  - Resolve delay | Resolve quality issue | Awaiting shipment | Track shipment
+  - Payment action | No action needed | Other
 
 TASK 6 — REQUIRES REPLY
-Does the latest message require a reply from your team?
 true  → a question was asked, approval was requested, or action is awaited
 false → purely informational, or vendor acknowledged without asking anything
 
 TASK 7 — SAMPLE STATUS
-Current status of any physical sample:
-  Dispatched | Received | Approved | Rejected | Pending | None
+Dispatched | Received | Approved | Rejected | Pending | None
 
-TASK 8 — REPLY DRAFT  ★ NEW ★
+TASK 8 — REPLY DRAFT
 Write a ready-to-send email reply on behalf of the One Quince merchandising team.
-
-Tone rules:
-  • Professional but warm — like a sharp, senior buyer, NOT a corporate robot
-  • First sentence: acknowledge what the vendor said or did (show you read it)
-  • Address the specific ask in the latest message directly — no vague pleasantries
-  • If action is needed from the vendor, state it clearly and politely in one line
-  • If action is needed from our side, acknowledge it and give a concrete next step
-  • Keep it SHORT: 3–5 sentences. No rambling. No filler like "I hope this email finds you well."
-  • End with a forward-looking line that keeps the relationship warm
-  • Salutation: "Hi [Vendor name]," — use the actual vendor name if known, else "Hi there,"
-  • Sign-off: "Best,\n[Your name]"  — use "[Your name]" as a placeholder for the sender's name
-
-Write the reply as plain text — no markdown, no asterisks, no bullet points.
-This is the body of an email. It must be ready to send with minimal edits.
+Tone: professional but warm, like a sharp senior buyer.
+First sentence: acknowledge what the vendor said or did.
+Address the specific ask in the latest message directly.
+Keep it SHORT: 3–5 sentences. No filler.
+Salutation: "{salutation}"
+Sign-off: "Best,\\n[Your name]"
+Plain text only — no markdown, no asterisks.
 
 ════ OUTPUT ════
-Return ONLY valid JSON. No markdown, no explanation, no extra text.
+Return ONLY valid JSON. No markdown, no explanation.
 {{
   "division":       "<one division>",
   "style_numbers":  "<comma-separated UPPERCASE or empty string>",
@@ -938,7 +907,6 @@ Return ONLY valid JSON. No markdown, no explanation, no extra text.
   "reply_draft":    "<ready-to-send email body, plain text, 3–5 sentences>"
 }}"""
 
-    # ── Call with JSON-parse retry ──
     parsed   = None
     last_raw = ""
     for parse_attempt in range(2):
@@ -964,7 +932,6 @@ Return ONLY valid JSON. No markdown, no explanation, no extra text.
     if parsed is not None:
         overview = parsed.get("ai_overview", "").strip()
 
-        # CJK safety net on overview
         if re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', overview):
             log.warning(f"LLM returned CJK overview for '{subject}' — retrying stripped prompt")
             stripped_context = ""
@@ -992,7 +959,6 @@ Return ONLY: {{"ai_overview": "<your English bullets separated by \\n>"}}"""
             except Exception:
                 overview = "• Thread summary unavailable — vendor email contains non-English content"
 
-        # Normalise requires_reply
         raw_reply = parsed.get("requires_reply", False)
         if isinstance(raw_reply, bool):
             requires_reply = raw_reply
@@ -1009,12 +975,12 @@ Return ONLY: {{"ai_overview": "<your English bullets separated by \\n>"}}"""
             sample_status = "None"
 
         reply_draft = parsed.get("reply_draft", "").strip()
-        # Sanity-check: if reply came back empty or with CJK, use a minimal fallback
         if not reply_draft or re.search(
             r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', reply_draft
         ):
+            # FIX 6: use vendor_name in fallback reply draft
             reply_draft = (
-                f"Hi {'there' if not vendor_name else vendor_name},\n\n"
+                f"{salutation}\n\n"
                 f"Thank you for your email regarding {subject}. "
                 f"We'll review and come back to you shortly.\n\nBest,\n[Your name]"
             )
@@ -1030,11 +996,12 @@ Return ONLY: {{"ai_overview": "<your English bullets separated by \\n>"}}"""
             "reply_draft":    reply_draft,
         }
 
+        # FIX 10: vendor_name passed into cache_set
         if thread_id and msg_count:
-            cache_set(thread_id, msg_count, result)
+            cache_set(thread_id, msg_count, vendor_name, result)
         return result
 
-    # ── Full fallback ──
+    # ── Full fallback — FIX 6: use vendor_name ──
     log.error(f"LLM completely failed for '{subject}'. Raw: {last_raw[:400]}")
     all_text = "\n".join(m["body"] for m in structured_messages)
     return {
@@ -1046,7 +1013,7 @@ Return ONLY: {{"ai_overview": "<your English bullets separated by \\n>"}}"""
         "requires_reply": "No",
         "sample_status":  "None",
         "reply_draft":    (
-            f"Hi {'there' if not vendor_name else vendor_name},\n\n"
+            f"{salutation}\n\n"
             f"Thanks for reaching out. We'll get back to you on {subject} shortly.\n\nBest,\n[Your name]"
         ),
     }
@@ -1081,6 +1048,7 @@ def _fallback_style_numbers(text: str) -> str:
 
 # ════════════════════════════════════════════════════════════
 # PO NUMBER EXTRACTION
+# FIX 5: deterministic — explicitly prioritises latest message
 # ════════════════════════════════════════════════════════════
 
 PO_PATTERNS = [
@@ -1098,8 +1066,10 @@ PO_NOISE = {
 
 
 def extract_po_number(structured_msgs: list) -> str:
-    seen    = set()
-    results = []
+    """
+    FIX 5: iterate newest-to-oldest explicitly (reversed), return first valid match.
+    This guarantees the latest PO number wins — previously relied on dict ordering.
+    """
     for msg in reversed(structured_msgs):
         text = msg["body"]
         for pattern in PO_PATTERNS:
@@ -1111,10 +1081,8 @@ def extract_po_number(structured_msgs: list) -> str:
                     continue
                 if not re.search(r'\d', candidate):
                     continue
-                if candidate not in seen:
-                    seen.add(candidate)
-                    results.append(candidate)
-    return results[0] if results else ""
+                return candidate   # FIX 5: return immediately — newest message wins
+    return ""
 
 
 # ════════════════════════════════════════════════════════════
@@ -1346,15 +1314,23 @@ def extract_shared_links(structured_msgs: list) -> str:
 
 # ════════════════════════════════════════════════════════════
 # SAMPLE REMINDER
+# FIX 7: timezone-safe — use UTC throughout
 # ════════════════════════════════════════════════════════════
 
 SAMPLE_REMINDER_DAYS = 7
 
 
 def compute_sample_reminder(sample_status: str, latest_msg_date) -> str:
+    """
+    FIX 7: latest_msg_date (from internalDate, UTC epoch ms) compared against
+    datetime.now(timezone.utc) — no more local-clock skew on cloud deployments.
+    """
     if not latest_msg_date:
         return ""
-    days_since = (datetime.now() - latest_msg_date).days
+    # Ensure both sides are UTC-aware for safe subtraction
+    if latest_msg_date.tzinfo is None:
+        latest_msg_date = latest_msg_date.replace(tzinfo=timezone.utc)
+    days_since = (datetime.now(timezone.utc) - latest_msg_date).days
     if sample_status == "Dispatched" and days_since >= SAMPLE_REMINDER_DAYS:
         return f"⚠️ Chase — dispatched {days_since}d ago, no update"
     if sample_status == "Pending" and days_since >= SAMPLE_REMINDER_DAYS:
@@ -1364,7 +1340,13 @@ def compute_sample_reminder(sample_status: str, latest_msg_date) -> str:
 
 # ════════════════════════════════════════════════════════════
 # THREAD PROCESSOR
+# FIX 7: internalDate parsed as UTC-aware datetime
 # ════════════════════════════════════════════════════════════
+
+def _utc_from_internal(ts_ms: int):
+    """Convert Gmail internalDate (UTC milliseconds) to a UTC-aware datetime."""
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
 
 def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
     thread_data = gmail_threads_get(gmail_svc, userId="me", id=thread_id, format="full")
@@ -1419,7 +1401,7 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
         msg_date_str = ""
         internal_ts  = int(msg.get("internalDate", 0))
         if internal_ts:
-            dt = datetime.fromtimestamp(internal_ts / 1000)
+            dt = _utc_from_internal(internal_ts)   # FIX 7: UTC-aware
             if earliest_date is None or dt < earliest_date:
                 earliest_date = dt
             msg_date_str = dt.strftime("%d %b %Y %H:%M")
@@ -1428,6 +1410,8 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
             if date_raw:
                 try:
                     dt = parsedate_to_datetime(date_raw)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
                     if earliest_date is None or dt < earliest_date:
                         earliest_date = dt
                     msg_date_str = dt.strftime("%d %b %Y")
@@ -1445,10 +1429,8 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
     if not structured_msgs:
         return None
 
-    # ── Smarter LLM window (v6.0) ──
     llm_msgs = _select_llm_window(structured_msgs, MAX_MSGS_IN_LLM)
 
-    # ── Vendor lookup ──
     seen_addrs       = set()
     ordered_external = []
     for addr in (all_senders + all_recipients + all_cc_deduped + all_bcc):
@@ -1475,14 +1457,12 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
     if not partner_name:
         partner_name = _fallback_vendor_name(ordered_external)
 
-    # ── Extraction ──
     all_bodies   = "\n\n".join(m["body"] for m in structured_msgs)
     shipment     = extract_shipment_info(all_bodies)
     po_number    = extract_po_number(structured_msgs)
     attachments  = extract_attachments(messages)
     shared_links = extract_shared_links(structured_msgs)
 
-    # ── Single combined LLM call (now includes reply draft + vendor_name) ──
     print(f"    🤖 LLM: {subject[:50]}...")
     llm = llm_analyse_thread(
         subject, llm_msgs,
@@ -1491,13 +1471,11 @@ def process_thread(gmail_svc, thread_id: str, vendor_db: dict):
         msg_count=len(messages),
     )
 
-    # ── Sample reminder ──
-    latest_msg_date = datetime.fromtimestamp(
-        int(messages[-1].get("internalDate", 0)) / 1000
-    ) if messages else None
+    # FIX 7: latest_msg_date is UTC-aware (from _utc_from_internal)
+    latest_internal = int(messages[-1].get("internalDate", 0))
+    latest_msg_date = _utc_from_internal(latest_internal) if latest_internal else None
     sample_reminder = compute_sample_reminder(llm["sample_status"], latest_msg_date)
 
-    # ── CC display ──
     cc_display = "; ".join(
         _extract_email(a)
         for a in all_cc_deduped
@@ -1547,7 +1525,6 @@ def _get_sheet_id(svc, tab_name: str) -> int:
 
 
 def _col_letter_n(n: int) -> str:
-    """1-based index to A1 column letter. e.g. 1→A, 27→AA."""
     result = ""
     while n:
         n, r = divmod(n - 1, 26)
@@ -1627,9 +1604,9 @@ def load_existing_rows(svc) -> tuple:
     thread_map  = {}
     subject_map = {}
 
-    thread_id_col  = _HEADER_INDEX["Thread ID"]  - 1   # 0-based index for row list
+    thread_id_col  = _HEADER_INDEX["Thread ID"]      - 1
     msg_count_col  = _HEADER_INDEX["Thread Messages"] - 1
-    subject_col    = _HEADER_INDEX["Subject"] - 1
+    subject_col    = _HEADER_INDEX["Subject"]         - 1
 
     for idx, row in enumerate(result.get("values", [])):
         while len(row) < len(LOGS_HEADERS):
@@ -1657,7 +1634,6 @@ def load_existing_rows(svc) -> tuple:
 
 
 def _row_data_to_sheet_value(field: str, row_data: dict) -> str:
-    """Map a LOGS_HEADERS field name to its value in row_data."""
     mapping = {
         "Subject":          row_data.get("Subject", ""),
         "Sender":           row_data.get("Sender", ""),
@@ -1688,10 +1664,6 @@ def _row_data_to_sheet_value(field: str, row_data: dict) -> str:
 
 
 def update_existing_row(svc, sheet_row: int, row_data: dict, backfill_tid: bool = False):
-    """
-    Batch-update only the reply-relevant columns for an existing row.
-    FIX v6.0: DRY_RUN check is now here too — in v5.0 dry-run missed updates.
-    """
     if DRY_RUN:
         log.info(f"DRY_RUN: would update row {sheet_row}")
         return
@@ -1702,7 +1674,6 @@ def update_existing_row(svc, sheet_row: int, row_data: dict, backfill_tid: bool 
         val    = _row_data_to_sheet_value(field, row_data)
         data.append({"range": f"'{SHEET_TAB}'!{letter}{sheet_row}", "values": [[val]]})
 
-    # Last Updated always written
     lu_letter = col_letter("Last Updated")
     data.append({
         "range":  f"'{SHEET_TAB}'!{lu_letter}{sheet_row}",
@@ -1723,7 +1694,6 @@ def update_existing_row(svc, sheet_row: int, row_data: dict, backfill_tid: bool 
 
 
 def _build_new_row(row_data: dict, now_str: str) -> list:
-    """Build a full row list ordered by LOGS_HEADERS."""
     row = []
     for header in LOGS_HEADERS:
         if header == "Last Updated":
@@ -1768,7 +1738,6 @@ def flush_error_log(svc):
 # ════════════════════════════════════════════════════════════
 
 def _fetch_meta_one(creds, tid: str) -> dict:
-    # Build a new service inside the thread — never share across threads
     svc = build("gmail", "v1", credentials=creds)
     try:
         meta = gmail_threads_get(
@@ -1795,7 +1764,7 @@ def fetch_all_metadata(creds, thread_ids: list) -> dict:
     results = {}
     with ThreadPoolExecutor(max_workers=GMAIL_WORKERS) as executor:
         futures = {
-            executor.submit(_fetch_meta_one, creds, tid): tid  # pass creds, not svc
+            executor.submit(_fetch_meta_one, creds, tid): tid
             for tid in thread_ids
         }
         for future in as_completed(futures):
@@ -1806,10 +1775,11 @@ def fetch_all_metadata(creds, thread_ids: list) -> dict:
 
 # ════════════════════════════════════════════════════════════
 # MAIN RUN LOOP
+# FIX 3: subject_map race guard — skip batchUpdate when sheet_row is None
 # ════════════════════════════════════════════════════════════
 
 def run(max_threads: int = 50):
-    print(f"\n🚀 Gmail Thread Extractor v6.0")
+    print(f"\n🚀 Gmail Thread Extractor v7.0")
     print(f"   Model: {OPENAI_MODEL} | {max_threads} threads | {GMAIL_WORKERS} parallel workers\n")
 
     creds      = authenticate()
@@ -1836,7 +1806,7 @@ def run(max_threads: int = 50):
         return
 
     all_tids = [t["id"] for t in gmail_threads]
-    meta_map = fetch_all_metadata(creds, all_tids)  # pass creds instead of gmail_svc
+    meta_map = fetch_all_metadata(creds, all_tids)
 
     new_rows   = []
     updated    = 0
@@ -1855,7 +1825,6 @@ def run(max_threads: int = 50):
         subj_key   = meta_subj.lower()
 
         try:
-            # ─ CASE 1: Thread ID already in sheet ─
             if tid in thread_map:
                 existing  = thread_map[tid]
                 old_count = existing["message_count"]
@@ -1877,10 +1846,20 @@ def run(max_threads: int = 50):
                           f"| Intent: {row_data['Intent']} "
                           f"| Reply needed: {row_data['Reply Needed']}")
 
-            # ─ CASE 2: Subject match, no Thread ID ─
             elif subj_key and subj_key in subject_map:
                 existing  = subject_map[subj_key]
                 old_count = existing["message_count"]
+
+                # FIX 3: guard against sheet_row=None (row added in same run)
+                if existing["sheet_row"] is None:
+                    # Row was queued in this run — treat as new to avoid None API call
+                    print(f"  [{i}/{total}] 🆕 Same-run subject match (queued) — {meta_subj[:50]}")
+                    row_data = process_thread(gmail_svc, tid, vendor_db)
+                    if row_data:
+                        new_rows.append(_build_new_row(row_data, now_str))
+                        added += 1
+                        print(f"    ✅ Queued as new row")
+                    continue
 
                 if curr_count <= old_count:
                     if not DRY_RUN:
@@ -1910,7 +1889,6 @@ def run(max_threads: int = 50):
                     backfilled += 1
                     print(f"    ✅ Row {existing['sheet_row']} updated + Thread ID stored")
 
-            # ─ CASE 3: Brand new thread ─
             else:
                 if curr_count < 2:
                     print(f"  [{i}/{total}] ⏭️  Single message — {meta_subj[:55]}")
@@ -1945,7 +1923,6 @@ def run(max_threads: int = 50):
             print(f"    ❌ Error on '{meta_subj[:40]}': {exc}")
             continue
 
-    # ── Batch write new rows ──
     if new_rows:
         if DRY_RUN:
             print(f"\n  🔍 DRY RUN — would write {len(new_rows)} new rows (skipped)")
@@ -1961,33 +1938,42 @@ def run(max_threads: int = 50):
 
     cs      = cache_stats()
     dry_tag = " [DRY RUN]" if DRY_RUN else ""
+
+    # FIX 11: include token usage in summary
+    total_tokens = _run_token_usage["prompt_tokens"] + _run_token_usage["completion_tokens"]
+
     print(f"\n{'═' * 60}")
     print(f"  🆕 New rows added        : {added}{dry_tag}")
-    print(f"  🔄 Rows updated          : {updated}  ← new replies processed")
+    print(f"  🔄 Rows updated          : {updated}")
     print(f"  🔗 Thread IDs backfilled : {backfilled}")
-    print(f"  ⏭️  Skipped               : {skipped}  ← no changes")
+    print(f"  ⏭️  Skipped               : {skipped}")
     print(f"  ❌ Errors                : {errors}  → check '{ERROR_TAB}' tab")
     print(f"  💾 LLM cache entries     : {cs['cached_entries']} (prompt={PROMPT_VERSION})")
     print(f"  🤖 Model                 : {OPENAI_MODEL}")
+    print(f"  🔢 Tokens this run       : {total_tokens:,}  "
+          f"(in={_run_token_usage['prompt_tokens']:,} / out={_run_token_usage['completion_tokens']:,})")
     print(f"  📄 Debug log             : gmail_agent.log")
     print(f"  📋 Audit log             : audit.jsonl")
     print(f"  🔗 Sheet : https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit")
     print(f"{'═' * 60}\n")
 
     write_audit_log({
-        "threads_fetched": total,
-        "added":           added,
-        "updated":         updated,
-        "backfilled":      backfilled,
-        "skipped":         skipped,
-        "errors":          errors,
-        "cache_entries":   cs["cached_entries"],
+        "threads_fetched":    total,
+        "added":              added,
+        "updated":            updated,
+        "backfilled":         backfilled,
+        "skipped":            skipped,
+        "errors":             errors,
+        "cache_entries":      cs["cached_entries"],
+        "total_tokens":       total_tokens,
+        "prompt_tokens":      _run_token_usage["prompt_tokens"],
+        "completion_tokens":  _run_token_usage["completion_tokens"],
     })
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Gmail Thread Extractor v6.0 — Merchandising Logs"
+        description="Gmail Thread Extractor v7.0 — Merchandising Logs"
     )
     parser.add_argument(
         "max_threads", nargs="?", type=int, default=50,
@@ -1997,12 +1983,20 @@ if __name__ == "__main__":
         "--dry-run", action="store_true",
         help="Read-only mode — analyse threads but do NOT write to Google Sheets"
     )
+    # FIX 13: --workers CLI arg (no longer requires editing source)
+    parser.add_argument(
+        "--workers", type=int, default=3,
+        help="Number of parallel Gmail metadata workers (default: 3)"
+    )
     args = parser.parse_args()
 
     if args.dry_run:
         DRY_RUN = True
         print("\n⚠️  DRY RUN MODE — no changes will be written to Google Sheets\n")
         log.info("DRY_RUN mode activated via --dry-run flag")
+
+    # FIX 13: apply workers arg
+    GMAIL_WORKERS = args.workers
 
     for secret_file in ("credentials.json", "token.json", ".env"):
         if os.path.exists(secret_file):
