@@ -1,9 +1,7 @@
 """
-Merchandising AI Agent — Streamlit Frontend  v3.0
+Merchandising AI Agent — Streamlit Frontend  v4.0
 ═══════════════════════════════════════════════════
-Design: Fashion editorial dark theme — deep navy canvas, electric coral/amber/teal accents.
-Typography: DM Serif Display (headings) + DM Sans (body) — editorial, characterful.
-Fully synced with gmail_reader v6.0 (24 columns A–X).
+Redesigned UI/UX — all functions and connections preserved from v3.0
 """
 
 import os
@@ -37,399 +35,695 @@ import gmail_reader
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Merch AI Agent",
-    page_icon="🧵",
+    page_title="Merch AI",
+    page_icon="◈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ── Master CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
 :root {
-    --navy:         #0A0F1E;
-    --navy-mid:     #111827;
-    --navy-card:    #161D2F;
-    --navy-hover:   #1E2A42;
-    --coral:        #FF5F5F;
-    --coral-dim:    rgba(255,95,95,0.15);
-    --amber:        #FFBE3D;
-    --amber-dim:    rgba(255,190,61,0.15);
-    --teal:         #3DFFD0;
-    --teal-dim:     rgba(61,255,208,0.12);
-    --violet:       #B76EFF;
-    --violet-dim:   rgba(183,110,255,0.12);
-    --sky:          #5BC8FF;
-    --sky-dim:      rgba(91,200,255,0.12);
-    --text-1:       #F0F4FF;
-    --text-2:       #9BAAC8;
-    --text-3:       #5A6A8A;
-    --border:       #1F2D47;
-    --border-bright:#2E4068;
+    --ink:         #0C0C0E;
+    --ink-mid:     #111115;
+    --ink-card:    #16161C;
+    --ink-hover:   #1E1E28;
+    --ink-raised:  #1A1A22;
+    --line:        #232330;
+    --line-hi:     #32324A;
+
+    --acid:        #C8FF00;
+    --acid-dim:    rgba(200,255,0,0.1);
+    --flame:       #FF4500;
+    --flame-dim:   rgba(255,69,0,0.1);
+    --ice:         #00E5FF;
+    --ice-dim:     rgba(0,229,255,0.08);
+    --gold:        #FFB800;
+    --gold-dim:    rgba(255,184,0,0.1);
+    --lilac:       #B794FF;
+    --lilac-dim:   rgba(183,148,255,0.1);
+
+    --t1: #F4F4F8;
+    --t2: #8A8AA8;
+    --t3: #44445A;
+    --t4: #2A2A3A;
+
+    --r: 8px;
+    --r-lg: 14px;
+    --r-pill: 100px;
 }
+
+*, *::before, *::after { box-sizing: border-box; }
 
 html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif !important;
-    background-color: var(--navy) !important;
-    color: var(--text-1) !important;
+    font-family: 'Instrument Sans', sans-serif !important;
+    background: var(--ink) !important;
+    color: var(--t1) !important;
 }
-.stApp { background: var(--navy) !important; }
-.stApp > header { background: transparent !important; }
+
+.stApp {
+    background: var(--ink) !important;
+}
+.stApp > header { background: transparent !important; box-shadow: none !important; }
+
+/* ─── Sidebar ─── */
 section[data-testid="stSidebar"] {
-    background: var(--navy-mid) !important;
-    border-right: 1px solid var(--border) !important;
+    background: var(--ink-mid) !important;
+    border-right: 1px solid var(--line) !important;
+    padding-top: 0 !important;
 }
-section[data-testid="stSidebar"] * { color: var(--text-1) !important; }
+section[data-testid="stSidebar"] > div { padding-top: 0 !important; }
+section[data-testid="stSidebar"] * { color: var(--t1) !important; }
 
+/* ─── Inputs ─── */
 div[data-baseweb="input"] input,
-div[data-baseweb="select"] > div,
 textarea {
-    background: var(--navy-card) !important;
-    border-color: var(--border-bright) !important;
-    color: var(--text-1) !important;
-    border-radius: 8px !important;
+    background: var(--ink-card) !important;
+    border: 1px solid var(--line) !important;
+    color: var(--t1) !important;
+    border-radius: var(--r) !important;
+    font-family: 'Instrument Sans', sans-serif !important;
+    transition: border-color 0.15s !important;
 }
-div[data-baseweb="select"] * {
-    color: var(--text-1) !important;
-    background: var(--navy-card) !important;
+div[data-baseweb="input"] input:focus,
+textarea:focus {
+    border-color: var(--acid) !important;
+    box-shadow: 0 0 0 3px var(--acid-dim) !important;
 }
+div[data-baseweb="select"] > div {
+    background: var(--ink-card) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--r) !important;
+    color: var(--t1) !important;
+}
+div[data-baseweb="select"] * { color: var(--t1) !important; background: var(--ink-card) !important; }
 ul[role="listbox"] {
-    background: var(--navy-card) !important;
-    border: 1px solid var(--border-bright) !important;
-    border-radius: 10px !important;
+    background: var(--ink-raised) !important;
+    border: 1px solid var(--line-hi) !important;
+    border-radius: var(--r-lg) !important;
+    padding: 4px !important;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.6) !important;
 }
-ul[role="listbox"] li:hover { background: var(--navy-hover) !important; }
+ul[role="listbox"] li:hover { background: var(--ink-hover) !important; border-radius: 6px !important; }
 
+/* ─── Expanders ─── */
 div[data-testid="stExpander"] {
-    background: var(--navy-card) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 12px !important;
-    margin-bottom: 10px !important;
-    transition: border-color 0.2s, box-shadow 0.2s;
+    background: var(--ink-card) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--r-lg) !important;
+    margin-bottom: 8px !important;
+    overflow: hidden !important;
+    transition: border-color 0.2s, box-shadow 0.2s !important;
 }
 div[data-testid="stExpander"]:hover {
-    border-color: var(--border-bright) !important;
-    box-shadow: 0 4px 24px rgba(255,95,95,0.07) !important;
+    border-color: var(--line-hi) !important;
 }
 div[data-testid="stExpander"] summary {
-    font-family: 'DM Sans', sans-serif !important;
+    font-family: 'Instrument Sans', sans-serif !important;
+    font-size: 13.5px !important;
     font-weight: 500 !important;
-    font-size: 14px !important;
-    color: var(--text-1) !important;
-    padding: 14px 18px !important;
+    color: var(--t1) !important;
+    padding: 14px 20px !important;
+    background: var(--ink-card) !important;
+}
+div[data-testid="stExpander"] summary:hover {
+    background: var(--ink-hover) !important;
 }
 
-hr { border-color: var(--border) !important; margin: 24px 0 !important; }
-
+/* ─── Metrics ─── */
 div[data-testid="stMetric"] {
-    background: var(--navy-card) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 14px !important;
-    padding: 18px 20px !important;
-    transition: transform 0.15s, box-shadow 0.15s;
+    background: var(--ink-card) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--r-lg) !important;
+    padding: 20px 22px !important;
+    position: relative !important;
+    overflow: hidden !important;
+    transition: border-color 0.2s, transform 0.15s !important;
 }
 div[data-testid="stMetric"]:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 28px rgba(61,255,208,0.1) !important;
+    border-color: var(--line-hi) !important;
+    transform: translateY(-1px) !important;
 }
 div[data-testid="stMetricLabel"] {
+    font-family: 'Instrument Sans', sans-serif !important;
     font-size: 11px !important;
     font-weight: 600 !important;
-    letter-spacing: 0.08em !important;
+    letter-spacing: 0.1em !important;
     text-transform: uppercase !important;
-    color: var(--text-2) !important;
+    color: var(--t3) !important;
+    margin-bottom: 6px !important;
 }
 div[data-testid="stMetricValue"] {
-    font-family: 'DM Serif Display', serif !important;
-    font-size: 2.2rem !important;
-    color: var(--text-1) !important;
+    font-family: 'Syne', sans-serif !important;
+    font-size: 2rem !important;
+    font-weight: 700 !important;
+    color: var(--t1) !important;
+    line-height: 1.1 !important;
 }
-div[data-testid="stMetricDelta"] { font-size: 12px !important; }
+div[data-testid="stMetricDelta"] {
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    margin-top: 4px !important;
+}
 
+/* ─── Buttons ─── */
 .stButton > button {
-    font-family: 'DM Sans', sans-serif !important;
+    font-family: 'Instrument Sans', sans-serif !important;
     font-weight: 600 !important;
-    letter-spacing: 0.04em !important;
-    border-radius: 10px !important;
-    border: none !important;
-    transition: all 0.2s !important;
+    font-size: 13px !important;
+    letter-spacing: 0.03em !important;
+    border-radius: var(--r) !important;
+    transition: all 0.15s !important;
+    height: 40px !important;
 }
 .stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, var(--coral), #FF8C42) !important;
-    color: white !important;
-    box-shadow: 0 4px 20px rgba(255,95,95,0.35) !important;
+    background: var(--acid) !important;
+    color: var(--ink) !important;
+    border: none !important;
+    box-shadow: 0 0 0 0 var(--acid-dim) !important;
 }
 .stButton > button[kind="primary"]:hover {
-    transform: translateY(-2px) scale(1.02) !important;
-    box-shadow: 0 8px 32px rgba(255,95,95,0.5) !important;
+    background: #d4ff1a !important;
+    box-shadow: 0 0 24px var(--acid-dim), 0 4px 16px rgba(200,255,0,0.2) !important;
+    transform: translateY(-1px) !important;
 }
+.stButton > button[kind="primary"]:active { transform: translateY(0) scale(0.98) !important; }
 .stButton > button:not([kind="primary"]) {
-    background: var(--navy-hover) !important;
-    color: var(--text-1) !important;
-    border: 1px solid var(--border-bright) !important;
+    background: transparent !important;
+    color: var(--t2) !important;
+    border: 1px solid var(--line) !important;
 }
 .stButton > button:not([kind="primary"]):hover {
-    background: var(--navy-card) !important;
-    border-color: var(--teal) !important;
-    color: var(--teal) !important;
+    background: var(--ink-hover) !important;
+    border-color: var(--line-hi) !important;
+    color: var(--t1) !important;
 }
 
+/* ─── Progress ─── */
 div[data-testid="stProgressBar"] > div > div {
-    background: linear-gradient(90deg, var(--coral), var(--amber)) !important;
+    background: linear-gradient(90deg, var(--acid), #80ff80) !important;
     border-radius: 4px !important;
 }
+div[data-testid="stProgressBar"] > div {
+    background: var(--ink-card) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 4px !important;
+    height: 6px !important;
+}
 
+/* ─── DataFrame ─── */
 div[data-testid="stDataFrame"] {
-    border-radius: 12px !important;
+    border-radius: var(--r-lg) !important;
+    border: 1px solid var(--line) !important;
     overflow: hidden !important;
-    border: 1px solid var(--border) !important;
 }
 
-div[data-baseweb="slider"] [role="slider"] { background: var(--coral) !important; }
+/* ─── Slider ─── */
+div[data-baseweb="slider"] [role="slider"] {
+    background: var(--acid) !important;
+    border: 2px solid var(--ink) !important;
+    width: 18px !important;
+    height: 18px !important;
+}
+div[data-baseweb="slider"] [data-testid="stSlider"] div[class*="track"] {
+    background: var(--line) !important;
+}
 
+/* ─── Code ─── */
 code, pre {
-    background: #0D1525 !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
+    background: var(--ink-mid) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--r) !important;
+    font-family: 'JetBrains Mono', monospace !important;
     font-size: 12px !important;
-    color: var(--teal) !important;
+    color: var(--acid) !important;
 }
 
+/* ─── Download ─── */
 div[data-testid="stDownloadButton"] button {
-    background: var(--sky-dim) !important;
-    color: var(--sky) !important;
-    border: 1px solid rgba(91,200,255,0.3) !important;
+    background: var(--ice-dim) !important;
+    color: var(--ice) !important;
+    border: 1px solid rgba(0,229,255,0.2) !important;
     font-size: 12px !important;
+    height: 34px !important;
 }
 div[data-testid="stDownloadButton"] button:hover {
-    background: rgba(91,200,255,0.2) !important;
-    border-color: var(--sky) !important;
-    transform: none !important;
+    background: rgba(0,229,255,0.14) !important;
+    border-color: var(--ice) !important;
 }
 
-.stCaption { color: var(--text-3) !important; font-size: 12px !important; }
+/* ─── Alerts ─── */
+div[data-testid="stAlert"] {
+    background: var(--ink-card) !important;
+    border-radius: var(--r-lg) !important;
+    border: 1px solid var(--line) !important;
+}
 
-#MainMenu, footer { visibility: hidden; }
-.viewerBadge_container__1QSob { display: none !important; }
+hr { border: none !important; border-top: 1px solid var(--line) !important; margin: 28px 0 !important; }
+#MainMenu, footer, .viewerBadge_container__1QSob { display: none !important; }
 
-/* ─── Custom components ─── */
+/* ══════════════════════════════════════
+   CUSTOM COMPONENTS
+══════════════════════════════════════ */
 
-.page-header {
-    font-family: 'DM Serif Display', serif;
-    font-size: 2.4rem;
-    color: var(--text-1);
-    margin-bottom: 4px;
-    line-height: 1.2;
-}
-.page-sub {
-    font-size: 12px;
-    color: var(--text-3);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin-bottom: 28px;
-    font-weight: 500;
-}
-.section-title {
-    font-family: 'DM Serif Display', serif;
-    font-size: 1.25rem;
-    color: var(--text-1);
-    margin: 24px 0 14px;
-}
-.sidebar-logo {
-    font-family: 'DM Serif Display', serif;
-    font-size: 1.5rem;
-    color: var(--text-1);
-    line-height: 1.3;
-    padding: 8px 0 20px;
-}
-.sidebar-logo span { color: var(--coral); }
-.sys-card {
-    background: var(--navy-card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-    font-size: 12px;
-}
-.sys-label {
-    color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+/* Page header */
+.ph-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 500;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--t3);
     margin-bottom: 8px;
 }
-.badge {
-    display: inline-block;
-    padding: 3px 11px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    margin-right: 5px;
-    margin-bottom: 3px;
+.ph-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 2.6rem;
+    font-weight: 800;
+    color: var(--t1);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin-bottom: 24px;
 }
-.b-coral  { background: var(--coral-dim);  color: var(--coral);  border: 1px solid rgba(255,95,95,0.3); }
-.b-amber  { background: var(--amber-dim);  color: var(--amber);  border: 1px solid rgba(255,190,61,0.3); }
-.b-teal   { background: var(--teal-dim);   color: var(--teal);   border: 1px solid rgba(61,255,208,0.3); }
-.b-violet { background: var(--violet-dim); color: var(--violet); border: 1px solid rgba(183,110,255,0.3); }
-.b-sky    { background: var(--sky-dim);    color: var(--sky);    border: 1px solid rgba(91,200,255,0.3); }
-.b-gray   { background: rgba(30,42,66,0.6); color: var(--text-2); border: 1px solid var(--border); }
+.ph-title em {
+    font-style: normal;
+    color: var(--acid);
+}
 
-.chase-alert {
-    background: linear-gradient(135deg, #1a1400, #1e1800);
-    border: 1px solid rgba(255,190,61,0.3);
-    border-left: 4px solid var(--amber);
-    border-radius: 0 10px 10px 0;
-    padding: 12px 16px;
-    margin: 5px 0;
-    font-size: 13px;
+/* Sidebar brand */
+.sb-brand {
+    padding: 28px 20px 24px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 16px;
+}
+.sb-wordmark {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--t1);
+    letter-spacing: -0.02em;
     display: flex;
     align-items: center;
-    gap: 12px;
-    transition: background 0.15s;
+    gap: 8px;
 }
-.chase-alert:hover { background: linear-gradient(135deg, #221a00, #2a2000); }
-.chase-vendor { font-weight: 600; color: var(--amber); min-width: 150px; flex-shrink: 0; }
-.chase-subject { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chase-pill {
-    background: var(--amber-dim);
-    color: var(--amber);
-    padding: 3px 10px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-    flex-shrink: 0;
+.sb-wordmark .dot {
+    width: 8px;
+    height: 8px;
+    background: var(--acid);
+    border-radius: 50%;
+    display: inline-block;
+    animation: pulse 2.5s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.75); }
+}
+.sb-sub {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--t3);
+    margin-top: 4px;
+    font-weight: 500;
 }
 
-.vendor-row {
+/* Section label */
+.sec-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--t3);
+    margin: 0 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.sec-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+}
+
+/* Section title */
+.sec-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--t1);
+    margin: 28px 0 14px;
+    letter-spacing: -0.01em;
+}
+
+/* Status card (sidebar) */
+.status-card {
+    background: var(--ink-card);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 16px 18px;
+    margin: 12px 0;
+}
+.status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 5px 0;
+    color: var(--t2);
+    border-bottom: 1px solid var(--line);
+}
+.status-row:last-child { border-bottom: none; }
+.status-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--t1);
+}
+.status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--acid);
+    display: inline-block;
+    margin-right: 6px;
+    animation: pulse 2.5s ease-in-out infinite;
+}
+
+/* Badge */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: var(--r-pill);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-family: 'Instrument Sans', sans-serif;
+}
+.b-acid   { background: var(--acid-dim);  color: var(--acid);  border: 1px solid rgba(200,255,0,0.25); }
+.b-flame  { background: var(--flame-dim); color: var(--flame); border: 1px solid rgba(255,69,0,0.25); }
+.b-ice    { background: var(--ice-dim);   color: var(--ice);   border: 1px solid rgba(0,229,255,0.2); }
+.b-gold   { background: var(--gold-dim);  color: var(--gold);  border: 1px solid rgba(255,184,0,0.25); }
+.b-lilac  { background: var(--lilac-dim); color: var(--lilac); border: 1px solid rgba(183,148,255,0.25); }
+.b-ghost  { background: rgba(255,255,255,0.04); color: var(--t3); border: 1px solid var(--line); }
+
+/* Alert row (chase) */
+.alert-strip {
     display: flex;
     align-items: center;
     gap: 14px;
-    padding: 11px 16px;
-    border-radius: 10px;
-    background: var(--navy-card);
-    border: 1px solid var(--border);
-    margin: 5px 0;
-    transition: border-color 0.2s, background 0.15s;
-    font-size: 13px;
+    padding: 13px 18px;
+    background: var(--ink-card);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--gold);
+    border-radius: 0 var(--r) var(--r) 0;
+    margin-bottom: 6px;
+    cursor: default;
+    transition: background 0.15s;
 }
-.vendor-row:hover { border-color: var(--border-bright); background: var(--navy-hover); }
-.vendor-name { font-weight: 600; color: var(--text-1); min-width: 160px; flex-shrink: 0; }
-.vendor-threads { font-weight: 700; color: var(--sky); font-size: 15px; }
-.vendor-reply { font-weight: 700; font-size: 14px; }
-.vendor-date { margin-left: auto; color: var(--text-3); font-size: 11px; }
+.alert-strip:hover { background: var(--ink-hover); }
+.alert-vendor {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--t1);
+    min-width: 150px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.alert-subject {
+    font-size: 12px;
+    color: var(--t2);
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.alert-pill {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--gold);
+    background: var(--gold-dim);
+    border: 1px solid rgba(255,184,0,0.25);
+    padding: 3px 10px;
+    border-radius: var(--r-pill);
+    white-space: nowrap;
+    flex-shrink: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
 
-.detail-pill {
+/* Vendor row */
+.vendor-strip {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 18px;
+    background: var(--ink-card);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    margin-bottom: 5px;
+    transition: border-color 0.15s, background 0.15s;
+    font-size: 13px;
+    cursor: default;
+}
+.vendor-strip:hover { border-color: var(--line-hi); background: var(--ink-hover); }
+.vn { font-weight: 600; color: var(--t1); min-width: 160px; flex-shrink: 0; }
+.vt { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 500; color: var(--ice); }
+.vr { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 500; }
+.vd { margin-left: auto; font-size: 11px; color: var(--t3); font-family: 'JetBrains Mono', monospace; }
+
+/* Detail pill */
+.dp {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    background: var(--navy-hover);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    padding: 4px 11px;
-    font-size: 12px;
-    color: var(--text-2);
-    margin: 3px 3px 3px 0;
+    background: var(--ink-raised);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    color: var(--t2);
+    margin: 2px 2px 2px 0;
+    white-space: nowrap;
 }
-.detail-pill b { color: var(--text-1); }
+.dp b { color: var(--t1); font-weight: 600; }
+.dp-acid b { color: var(--acid); }
+.dp-ice b { color: var(--ice); }
+.dp-gold b { color: var(--gold); }
+.dp-flame b { color: var(--flame); }
+.dp-lilac b { color: var(--lilac); }
 
-.ov-bullet {
-    padding: 7px 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 13.5px;
-    color: var(--text-2);
-    line-height: 1.7;
+/* Sample status pill */
+.ss-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 14px;
+    border-radius: var(--r-pill);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border: 1px solid;
 }
-.ov-bullet:last-child { border-bottom: none; }
+.ss-Dispatched { background: var(--gold-dim);  color: var(--gold);  border-color: rgba(255,184,0,0.25); }
+.ss-Received   { background: var(--ice-dim);   color: var(--ice);   border-color: rgba(0,229,255,0.2); }
+.ss-Approved   { background: var(--acid-dim);  color: var(--acid);  border-color: rgba(200,255,0,0.2); }
+.ss-Rejected   { background: var(--flame-dim); color: var(--flame); border-color: rgba(255,69,0,0.25); }
+.ss-Pending    { background: var(--lilac-dim); color: var(--lilac); border-color: rgba(183,148,255,0.25); }
+.ss-None       { background: var(--ink-raised); color: var(--t3); border-color: var(--line); }
 
-.ship-card {
-    background: linear-gradient(135deg, #0a1a2a, #0c1e30);
-    border: 1px solid rgba(61,255,208,0.2);
-    border-radius: 10px;
-    padding: 14px 18px;
-    font-size: 13px;
+/* Ship card */
+.ship-block {
+    background: var(--ink-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 14px 16px;
 }
-.ship-carrier { color: var(--teal); font-weight: 600; font-size: 14px; }
-.ship-awb { color: var(--text-1); font-family: 'Courier New', monospace; font-size: 13px; margin-top: 4px; }
-.ship-date { color: var(--text-3); font-size: 11px; margin-top: 4px; }
+.ship-carrier { font-size: 13px; font-weight: 600; color: var(--ice); display: flex; align-items: center; gap: 6px; }
+.ship-awb { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--t1); margin-top: 5px; }
+.ship-date { font-size: 11px; color: var(--t3); margin-top: 4px; font-family: 'JetBrains Mono', monospace; }
+.ship-none { font-size: 12px; color: var(--t3); font-style: italic; }
 
-.reply-label {
+/* Reply block */
+.reply-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--sky);
-    margin-bottom: 6px;
+    color: var(--ice);
+    margin-bottom: 8px;
+    font-family: 'JetBrains Mono', monospace;
 }
-.reply-box {
-    background: linear-gradient(135deg, #081830, #0c1f38);
-    border: 1px solid rgba(91,200,255,0.25);
-    border-left: 4px solid var(--sky);
-    border-radius: 0 12px 12px 0;
-    padding: 20px 24px;
-    font-family: 'DM Sans', sans-serif;
-    font-size: 13.5px;
+.reply-header::before {
+    content: '';
+    width: 20px;
+    height: 1px;
+    background: var(--ice);
+    opacity: 0.4;
+}
+.reply-body {
+    background: var(--ink-raised);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--ice);
+    border-radius: 0 var(--r) var(--r) 0;
+    padding: 18px 22px;
+    font-size: 13px;
     line-height: 1.85;
-    color: var(--text-1);
+    color: var(--t1);
     white-space: pre-wrap;
-    margin: 8px 0 12px;
+    font-family: 'Instrument Sans', sans-serif;
 }
 
-.ss-dispatched { background: var(--amber-dim)!important;  color: var(--amber)!important;  border-color: rgba(255,190,61,0.3)!important; }
-.ss-received   { background: var(--teal-dim)!important;   color: var(--teal)!important;   border-color: rgba(61,255,208,0.3)!important; }
-.ss-approved   { background: var(--teal-dim)!important;   color: var(--teal)!important;   border-color: rgba(61,255,208,0.3)!important; }
-.ss-rejected   { background: var(--coral-dim)!important;  color: var(--coral)!important;  border-color: rgba(255,95,95,0.3)!important; }
-.ss-pending    { background: var(--violet-dim)!important; color: var(--violet)!important; border-color: rgba(183,110,255,0.3)!important; }
+/* Overview bullet */
+.ov-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--t2);
+    line-height: 1.6;
+}
+.ov-line:last-child { border-bottom: none; }
+.ov-line::before {
+    content: '—';
+    color: var(--t4);
+    flex-shrink: 0;
+    margin-top: 1px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+}
 
-.log-area {
-    background: #050c18;
-    border: 1px solid var(--border);
-    border-radius: 10px;
+/* Log terminal */
+.terminal {
+    background: var(--ink-mid);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--acid);
+    border-radius: 0 0 var(--r) var(--r);
     padding: 14px 18px;
-    font-family: 'Courier New', monospace;
-    font-size: 12px;
-    color: var(--teal);
-    line-height: 1.8;
-    min-height: 120px;
-    max-height: 200px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    line-height: 1.85;
+    min-height: 130px;
+    max-height: 220px;
     overflow-y: auto;
 }
+.terminal-bar {
+    background: var(--ink-card);
+    border: 1px solid var(--line);
+    border-bottom: none;
+    border-radius: var(--r) var(--r) 0 0;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.t-dot { width: 8px; height: 8px; border-radius: 50%; }
 
-.config-card {
-    background: var(--navy-card);
-    border: 1px solid var(--border);
-    border-top: 3px solid var(--teal);
-    border-radius: 12px;
-    padding: 20px 24px;
-    margin-bottom: 22px;
-}
-.config-label {
-    font-size: 10px;
-    color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    font-weight: 600;
-    margin-bottom: 14px;
-}
-.filter-card {
-    background: var(--navy-card);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 18px 22px;
+/* Config block */
+.cfg-block {
+    background: var(--ink-card);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 20px 24px 16px;
     margin-bottom: 20px;
 }
-.filter-label {
-    font-size: 10px;
-    color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    font-weight: 600;
-    margin-bottom: 14px;
+
+/* Filter bar */
+.filter-bar {
+    background: var(--ink-card);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 18px 22px;
+    margin-bottom: 18px;
 }
+
+/* Section divider label */
+.divlabel {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--t3);
+    font-family: 'JetBrains Mono', monospace;
+    margin: 20px 0 10px;
+}
+
+/* Count badge */
+.count-tag {
+    background: var(--ink-raised);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 2px 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--t2);
+}
+
+/* KPI accent bar */
+div[data-testid="stMetric"]:nth-child(1)  { border-top: 2px solid var(--acid) !important; }
+div[data-testid="stMetric"]:nth-child(2)  { border-top: 2px solid var(--flame) !important; }
+div[data-testid="stMetric"]:nth-child(3)  { border-top: 2px solid var(--gold) !important; }
+div[data-testid="stMetric"]:nth-child(4)  { border-top: 2px solid var(--ice) !important; }
+div[data-testid="stMetric"]:nth-child(5)  { border-top: 2px solid var(--lilac) !important; }
+div[data-testid="stMetric"]:nth-child(6)  { border-top: 2px solid var(--t3) !important; }
+
+/* Result metrics on sync page */
+.result-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
+    margin-top: 20px;
+}
+.r-card {
+    background: var(--ink-card);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 16px 18px;
+    text-align: center;
+}
+.r-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--t3);
+    margin-bottom: 6px;
+    font-family: 'JetBrains Mono', monospace;
+}
+.r-value {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.8rem;
+    font-weight: 800;
+    line-height: 1;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-hi); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--t3); }
+
+/* Checkbox */
+div[data-baseweb="checkbox"] label span { color: var(--t1) !important; font-size: 13px !important; }
+div[data-baseweb="checkbox"] svg { stroke: var(--acid) !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -510,19 +804,19 @@ def _safe(row, col, default=""):
 
 def _intent_badge(intent: str) -> str:
     cls_map = {
-        "chase":   "b-amber",
-        "delay":   "b-coral",
-        "quality": "b-coral",
-        "approve": "b-teal",
-        "review":  "b-teal",
-        "track":   "b-sky",
-        "await":   "b-sky",
-        "confirm": "b-violet",
-        "payment": "b-coral",
-        "no action": "b-gray",
-        "other":   "b-gray",
+        "chase":   "b-gold",
+        "delay":   "b-flame",
+        "quality": "b-flame",
+        "approve": "b-acid",
+        "review":  "b-acid",
+        "track":   "b-ice",
+        "await":   "b-ice",
+        "confirm": "b-lilac",
+        "payment": "b-flame",
+        "no action": "b-ghost",
+        "other":   "b-ghost",
     }
-    cls = "b-gray"
+    cls = "b-ghost"
     for k, v in cls_map.items():
         if k in intent.lower():
             cls = v
@@ -531,23 +825,18 @@ def _intent_badge(intent: str) -> str:
 
 
 def _sample_pill(status: str) -> str:
-    icons = {"Dispatched": "📤", "Received": "📥", "Approved": "✅",
-             "Rejected": "❌", "Pending": "⏳", "None": "—"}
-    cls_map = {"Dispatched": "ss-dispatched", "Received": "ss-received",
-               "Approved": "ss-approved",     "Rejected": "ss-rejected",
-               "Pending": "ss-pending"}
+    icons = {"Dispatched":"↑", "Received":"↓", "Approved":"✓",
+             "Rejected":"✕", "Pending":"◌", "None":"—"}
     icon = icons.get(status, "")
-    cls  = cls_map.get(status, "")
-    base = f'class="detail-pill {cls}"' if cls else 'class="detail-pill"'
-    return f'<span {base}>{icon} {status}</span>'
+    css  = f"ss-{status}" if status in ("Dispatched","Received","Approved","Rejected","Pending") else "ss-None"
+    return f'<span class="ss-pill {css}">{icon} {status}</span>'
 
 
 def _dpill(label: str, value: str, color: str = "") -> str:
     if not value:
         return ""
-    c = {"coral": "var(--coral)", "teal": "var(--teal)", "amber": "var(--amber)",
-         "sky": "var(--sky)", "violet": "var(--violet)"}.get(color, "var(--text-1)")
-    return f'<span class="detail-pill">{label}: <b style="color:{c}">{value}</b></span>'
+    cls = f"dp dp-{color}" if color else "dp"
+    return f'<span class="{cls}">{label} <b>{value}</b></span>'
 
 
 def _opts(df, col):
@@ -559,53 +848,65 @@ def _opts(df, col):
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
-    <div class="sidebar-logo">
-        Merch<span>.</span>AI<br>
-        <span style="font-family:'DM Sans',sans-serif;font-size:11px;
-              color:#5A6A8A;font-weight:400;letter-spacing:0.12em;
-              text-transform:uppercase;">Merchandising Agent</span>
+    <div class="sb-brand">
+        <div class="sb-wordmark">
+            <span class="dot"></span>Merch AI
+        </div>
+        <div class="sb-sub">Merchandising Intelligence</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Jump navigation — set by clickable dashboard metrics
     if "jump_to_viewer" not in st.session_state:
-        st.session_state.jump_to_viewer  = False
+        st.session_state.jump_to_viewer = False
     if "jump_sample_filter" not in st.session_state:
         st.session_state.jump_sample_filter = "All"
 
-    _page_options = ["📊  Dashboard", "🔄  Sync Gmail", "🗂️  Thread Viewer"]
+    _page_options = ["Dashboard", "Sync Gmail", "Thread Viewer"]
     _default_page = 2 if st.session_state.jump_to_viewer else 0
-    page = st.radio("", _page_options, index=_default_page,
+    page = st.radio("Navigation", _page_options, index=_default_page,
                     label_visibility="collapsed")
-    # Clear jump flag once page radio has consumed it
     if st.session_state.jump_to_viewer and "Thread Viewer" in page:
         st.session_state.jump_to_viewer = False
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<p style="font-size:10px;color:#5A6A8A;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;margin-bottom:8px;">Quick Actions</p>', unsafe_allow_html=True)
-    if st.button("🔃 Refresh Data", use_container_width=True):
+
+    # Refresh — clearly labelled purpose
+    if st.button("↺  Refresh Data", use_container_width=True,
+                 help="Clear cached sheet data and reload from Google Sheets"):
         st.session_state.df_logs = None
         st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
+
     cs = cache_stats()
     from gmail_reader import _run_token_usage
-    _tok_in  = _run_token_usage.get("prompt_tokens", 0)
-    _tok_out = _run_token_usage.get("completion_tokens", 0)
+    _tok_in    = _run_token_usage.get("prompt_tokens", 0)
+    _tok_out   = _run_token_usage.get("completion_tokens", 0)
     _tok_total = _tok_in + _tok_out
-    _tok_str = f"{_tok_total:,}" if _tok_total else "—"
+    _tok_str   = f"{_tok_total:,}" if _tok_total else "—"
+
     st.markdown(f"""
-    <div class="sys-card">
-        <div class="sys-label">System Status</div>
-        <div style="color:#9BAAC8;margin-bottom:5px;">
-            💾 <b style="color:#3DFFD0">{cs.get('cached_entries', 0)}</b> cached threads
+    <div class="status-card">
+        <div style="font-size:10px;font-weight:700;letter-spacing:0.1em;
+                    text-transform:uppercase;color:var(--t3);margin-bottom:10px;
+                    font-family:'JetBrains Mono',monospace;">
+            System Status
         </div>
-        <div style="color:#9BAAC8;margin-bottom:5px;">
-            🔢 <b style="color:#FFD166">{_tok_str}</b> tokens this run
-            <span style="font-size:11px;color:#5A6785;">({_tok_in:,} in / {_tok_out:,} out)</span>
+        <div class="status-row">
+            <span>Cached threads</span>
+            <span class="status-val">{cs.get('cached_entries', 0)}</span>
         </div>
-        <div style="color:#9BAAC8;">
-            🤖 <b style="color:#B76EFF">GPT-5.4</b> active
+        <div class="status-row">
+            <span>Tokens this run</span>
+            <span class="status-val">{_tok_str}</span>
+        </div>
+        <div class="status-row">
+            <span>In / Out</span>
+            <span class="status-val" style="font-size:11px">{_tok_in:,} / {_tok_out:,}</span>
+        </div>
+        <div class="status-row">
+            <span>Model</span>
+            <span class="status-val"><span class="status-dot"></span>GPT-5.4</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -614,61 +915,47 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════════════════════
 # PAGE: DASHBOARD
 # ════════════════════════════════════════════════════════════════════════════════
-if "Dashboard" in page:
-    st.markdown('<div class="page-header">Overview Dashboard</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">Real-time merchandising intelligence</div>', unsafe_allow_html=True)
+if page == "Dashboard":
+    st.markdown('<div class="ph-eyebrow">Overview</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ph-title">Merchandising <em>Intelligence</em></div>', unsafe_allow_html=True)
 
     df = st.session_state.df_logs if st.session_state.df_logs is not None else load_data_from_sheets()
 
     if df.empty:
-        st.info("No data yet — head to **Sync Gmail** to pull your first threads.")
+        st.info("No data yet — go to **Sync Gmail** to pull your first threads.")
         st.stop()
 
-    # ── KPI row ───────────────────────────────────────────────────────────────
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-
-    total = len(df)
-    k1.metric("Total Threads", total)
-
+    # ── KPIs ─────────────────────────────────────────────────────────────────
+    total       = len(df)
     needs_reply = int((df.get("Reply Needed", pd.Series(dtype=str)) == "Yes").sum())
-    k2.metric("Needs Reply", needs_reply,
-              delta=f"{round(needs_reply / max(total, 1) * 100)}% of threads",
-              delta_color="off")
+    chase_n     = int(df.get("Sample Reminder", pd.Series(dtype=str)).str.startswith("⚠️", na=False).sum())
+    po_ct       = int((df.get("PO Number", pd.Series(dtype=str)).replace("", pd.NA).notna()).sum())
+    dispatched  = int((df.get("Sample Status", pd.Series(dtype=str)) == "Dispatched").sum())
 
-    chase_n = int(df.get("Sample Reminder", pd.Series(dtype=str)).str.startswith("⚠️", na=False).sum())
-    k3.metric("⚠️ Chase Alerts", chase_n,
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Total Threads",    total)
+    k2.metric("Needs Reply",      needs_reply,
+              delta=f"{round(needs_reply/max(total,1)*100)}% of threads",
+              delta_color="off")
+    k3.metric("Chase Alerts",     chase_n,
               delta="Action required" if chase_n else "All clear",
               delta_color="inverse")
+    k4.metric("Threads with PO",  po_ct)
+    k5.metric("Dispatched",       dispatched)
 
-    po_ct = int((df.get("PO Number", pd.Series(dtype=str)).replace("", pd.NA).notna()).sum())
-    k4.metric("Threads with PO", po_ct)
-
-    dispatched = int((df.get("Sample Status", pd.Series(dtype=str)) == "Dispatched").sum())
-    k5.metric("Dispatched Samples", dispatched)
-    # Small "view" link below the metric — styled as an unobtrusive link
-    k5.markdown("""<style>
-        div[data-testid="column"]:nth-child(5) button[kind="secondary"] {
-            background: none !important; border: none !important;
-            color: #3DFFD0 !important; font-size: 11px !important;
-            padding: 0 !important; margin-top: -6px !important;
-            text-decoration: underline !important; cursor: pointer !important;
-            box-shadow: none !important;
-        }
-    </style>""", unsafe_allow_html=True)
-    if k5.button("↗ View threads", key="dispatched_jump", use_container_width=False):
+    # "View dispatched" — purposeful deep-link button
+    if k5.button("View →", key="dispatched_jump",
+                 help="Open Thread Viewer filtered to Dispatched samples"):
         st.session_state.jump_to_viewer     = True
         st.session_state.jump_sample_filter = "Dispatched"
         st.rerun()
 
     if "Vendor Name" in df.columns:
         top_v = df[df["Vendor Name"].replace("", pd.NA).notna()]["Vendor Name"].value_counts()
-        top_vendor_full = top_v.index[0] if not top_v.empty else "—"
-        k6.metric(
-            "Top Vendor",
-            top_vendor_full,
-            delta=f"{top_v.iloc[0]} threads" if not top_v.empty else "",
-            help=top_vendor_full,   # hover tooltip shows full name even if truncated
-        )
+        tv    = top_v.index[0] if not top_v.empty else "—"
+        k6.metric("Top Vendor", tv,
+                  delta=f"{top_v.iloc[0]} threads" if not top_v.empty else "",
+                  help=tv)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -677,17 +964,16 @@ if "Dashboard" in page:
         chase_df = df[df["Sample Reminder"].str.startswith("⚠️", na=False)]
         if not chase_df.empty:
             st.markdown(
-                f'<div class="section-title">⚠️ Chase Alerts '
-                f'<span style="font-family:\'DM Sans\',sans-serif;font-size:14px;'
-                f'color:var(--amber);font-weight:400;">— {len(chase_df)} threads need attention</span></div>',
+                f'<div class="sec-title">Chase Alerts '
+                f'<span class="count-tag">{len(chase_df)}</span></div>',
                 unsafe_allow_html=True
             )
             for _, row in chase_df.iterrows():
                 st.markdown(f"""
-                <div class="chase-alert">
-                    <span class="chase-vendor">{_safe(row,'Vendor Name','Unknown')}</span>
-                    <span class="chase-subject">{_safe(row,'Subject','')[:65]}</span>
-                    <span class="chase-pill">{_safe(row,'Sample Reminder','')}</span>
+                <div class="alert-strip">
+                    <span class="alert-vendor">{_safe(row,'Vendor Name','Unknown')}</span>
+                    <span class="alert-subject">{_safe(row,'Subject','')[:70]}</span>
+                    <span class="alert-pill">{_safe(row,'Sample Reminder','').replace('⚠️','').strip()}</span>
                 </div>
                 """, unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
@@ -695,66 +981,65 @@ if "Dashboard" in page:
     # ── Charts ────────────────────────────────────────────────────────────────
     ca, cb, cc = st.columns(3)
     with ca:
-        st.markdown('<div class="section-title">By Intent</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-title">Intent Breakdown</div>', unsafe_allow_html=True)
         if "Intent" in df.columns:
             ic = df["Intent"].value_counts().reset_index()
             ic.columns = ["Intent", "Count"]
-            st.bar_chart(ic.set_index("Intent"), color="#FF5F5F", height=260)
-
+            st.bar_chart(ic.set_index("Intent"), color="#C8FF00", height=240)
     with cb:
-        st.markdown('<div class="section-title">By Division</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-title">By Division</div>', unsafe_allow_html=True)
         if "Division" in df.columns:
             dc = df["Division"].value_counts().reset_index()
             dc.columns = ["Division", "Count"]
-            st.bar_chart(dc.set_index("Division"), color="#3DFFD0", height=260)
-
+            st.bar_chart(dc.set_index("Division"), color="#00E5FF", height=240)
     with cc:
-        st.markdown('<div class="section-title">Sample Pipeline</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-title">Sample Pipeline</div>', unsafe_allow_html=True)
         if "Sample Status" in df.columns:
             sc = df["Sample Status"].value_counts().reset_index()
             sc.columns = ["Status", "Count"]
-            st.bar_chart(sc.set_index("Status"), color="#FFBE3D", height=260)
+            st.bar_chart(sc.set_index("Status"), color="#FFB800", height=240)
 
     st.divider()
 
     # ── Recent activity ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-title">Recent Activity</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">Recent Activity</div>', unsafe_allow_html=True)
     show_cols = [c for c in
-        ["Sent Date", "Vendor Name", "Subject", "Division", "Intent",
-         "Reply Needed", "Sample Status", "PO Number", "AWB No"]
+        ["Sent Date","Vendor Name","Subject","Division","Intent",
+         "Reply Needed","Sample Status","PO Number","AWB No"]
         if c in df.columns]
-    recent = df.sort_values("Sent Date", ascending=False).head(10) if "Sent Date" in df.columns else df.head(10)
+    recent = df.sort_values("Sent Date", ascending=False).head(10) \
+              if "Sent Date" in df.columns else df.head(10)
     st.dataframe(recent[show_cols], use_container_width=True, hide_index=True)
 
     st.divider()
 
     # ── Vendor breakdown ──────────────────────────────────────────────────────
     if "Vendor Name" in df.columns:
-        st.markdown('<div class="section-title">Vendor Breakdown</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec-title">Vendor Breakdown</div>', unsafe_allow_html=True)
         vdf = df[df["Vendor Name"].replace("", pd.NA).notna()]
         if not vdf.empty:
             vstats = (
                 vdf.groupby("Vendor Name")
-                .agg(Threads=("Subject", "count"),
-                     Reply_Needed=("Reply Needed", lambda x: (x == "Yes").sum()),
-                     Latest=("Sent Date", "max"))
-                .sort_values("Threads", ascending=False)
-                .head(12)
-                .reset_index()
+                .agg(Threads=("Subject","count"),
+                     Reply_Needed=("Reply Needed", lambda x: (x=="Yes").sum()),
+                     Latest=("Sent Date","max"))
+                .sort_values("Threads", ascending=False).head(12).reset_index()
             )
             for _, vrow in vstats.iterrows():
                 rn  = int(vrow["Reply_Needed"])
-                col = "var(--coral)" if rn > 0 else "var(--teal)"
+                col = "var(--flame)" if rn > 0 else "var(--acid)"
                 st.markdown(f"""
-                <div class="vendor-row">
-                    <span class="vendor-name">{vrow['Vendor Name']}</span>
-                    <span style="color:#9BAAC8;font-size:12px;">
-                        <span class="vendor-threads">{vrow['Threads']}</span> threads
+                <div class="vendor-strip">
+                    <span class="vn">{vrow['Vendor Name']}</span>
+                    <span style="font-size:12px;color:var(--t3);">
+                        <span class="vt">{vrow['Threads']}</span>
+                        <span style="margin-left:3px;font-size:11px">threads</span>
                     </span>
-                    <span style="color:#9BAAC8;font-size:12px;">
-                        Reply needed: <span class="vendor-reply" style="color:{col}">{rn}</span>
+                    <span style="font-size:12px;color:var(--t3);">
+                        Reply needed:
+                        <span class="vr" style="color:{col}">{rn}</span>
                     </span>
-                    <span class="vendor-date">Last: {str(vrow.get('Latest',''))[:10]}</span>
+                    <span class="vd">Last active {str(vrow.get('Latest',''))[:10]}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -762,35 +1047,58 @@ if "Dashboard" in page:
 # ════════════════════════════════════════════════════════════════════════════════
 # PAGE: SYNC GMAIL
 # ════════════════════════════════════════════════════════════════════════════════
-elif "Sync" in page:
-    st.markdown('<div class="page-header">Sync Gmail Inbox</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">Pull threads · Analyse with GPT-5.4 · Write to Sheets</div>', unsafe_allow_html=True)
+elif page == "Sync Gmail":
+    st.markdown('<div class="ph-eyebrow">Inbox Sync</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ph-title">Sync <em>Gmail</em></div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="config-card"><div class="config-label">Sync Configuration</div>', unsafe_allow_html=True)
-    cfg1, cfg2, cfg3 = st.columns([3, 1, 1])
+    # Config card
+    st.markdown('<div class="cfg-block"><div class="sec-label">Sync Configuration</div>', unsafe_allow_html=True)
+    cfg1, cfg2, cfg3 = st.columns([4, 1, 1])
     with cfg1:
-        max_threads = st.slider("Threads to fetch", 1, 200, 20,
-                                help="How many inbox threads to process this run")
+        max_threads = st.slider(
+            "Threads to fetch",
+            min_value=1, max_value=200, value=20,
+            help="Number of inbox threads to analyse this run"
+        )
     with cfg2:
         st.markdown("<br>", unsafe_allow_html=True)
-        dry_run = st.checkbox("🔍 Dry Run", help="Analyse but don't write to Sheets")
+        dry_run = st.checkbox(
+            "Dry run",
+            help="Analyse threads with GPT but do not write results to Google Sheets"
+        )
     with cfg3:
         st.markdown("<br><br>", unsafe_allow_html=True)
         if dry_run:
-            st.markdown('<span class="badge b-amber">READ ONLY</span>', unsafe_allow_html=True)
+            st.markdown('<span class="badge b-gold">Read only</span>', unsafe_allow_html=True)
         else:
-            st.markdown('<span class="badge b-teal">WRITE MODE</span>', unsafe_allow_html=True)
+            st.markdown('<span class="badge b-acid">Write mode</span>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    btn_col, tip_col = st.columns([1, 3])
-    with btn_col:
-        start = st.button("🚀 Start Sync", type="primary", use_container_width=True)
-    with tip_col:
-        st.markdown('<br><span style="color:#5A6A8A;font-size:13px;">GPT-5.4 analyses each thread once and caches the result — repeated runs are fast and free.</span>', unsafe_allow_html=True)
+    # Start button — clear call-to-action
+    bcol, tcol = st.columns([1, 3])
+    with bcol:
+        start = st.button(
+            "Run Sync →",
+            type="primary",
+            use_container_width=True,
+            help="Connect to Gmail, analyse threads via GPT-5.4, and update Google Sheets"
+        )
+    with tcol:
+        st.markdown(
+            '<div style="padding-top:10px;font-size:12px;color:var(--t3);">'
+            'GPT-5.4 analyses each thread once — results are cached. '
+            'Repeat runs only re-process new or updated threads.'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
     if start:
         ph = st.empty()
-        ph.markdown('<div style="color:var(--teal);font-size:13px;padding:8px 0;">⚡ Connecting…</div>', unsafe_allow_html=True)
+        ph.markdown(
+            '<div style="font-size:13px;color:var(--acid);padding:8px 0;'
+            'font-family:\'JetBrains Mono\',monospace;">▶ Connecting…</div>',
+            unsafe_allow_html=True
+        )
 
         gmail_svc, sheets_svc, creds = get_google_services()
         gmail_reader.DRY_RUN = dry_run
@@ -800,52 +1108,78 @@ elif "Sync" in page:
             _ensure_tab(sheets_svc, ERROR_TAB, ERROR_HEADERS)
         thread_map, subject_map = load_existing_rows(sheets_svc)
 
-        ph.markdown('<div style="color:var(--teal);font-size:13px;padding:8px 0;">✅ Connected. Fetching thread list…</div>', unsafe_allow_html=True)
+        ph.markdown(
+            '<div style="font-size:13px;color:var(--acid);padding:8px 0;'
+            'font-family:\'JetBrains Mono\',monospace;">✓ Connected — fetching thread list…</div>',
+            unsafe_allow_html=True
+        )
         result        = gmail_svc.users().threads().list(userId="me", maxResults=max_threads, q="in:inbox").execute()
         gmail_threads = result.get("threads", [])
         if not gmail_threads:
             st.info("No threads found in inbox.")
             st.stop()
 
-        ph.markdown(f'<div style="color:var(--teal);font-size:13px;padding:8px 0;">✅ {len(gmail_threads)} threads found. Fetching metadata…</div>', unsafe_allow_html=True)
+        ph.markdown(
+            f'<div style="font-size:13px;color:var(--acid);padding:8px 0;'
+            f'font-family:\'JetBrains Mono\',monospace;">'
+            f'✓ {len(gmail_threads)} threads found — fetching metadata…</div>',
+            unsafe_allow_html=True
+        )
         all_tids = [t["id"] for t in gmail_threads]
         meta_map = fetch_all_metadata_safe(creds, all_tids)
         ph.empty()
 
         progress_bar = st.progress(0)
-        st.markdown('<div style="font-size:12px;color:#5A6A8A;margin:-8px 0 10px;">Processing threads…</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:11px;color:var(--t3);margin:-6px 0 10px;'
+            'font-family:\'JetBrains Mono\',monospace;">Processing…</div>',
+            unsafe_allow_html=True
+        )
+
+        # Terminal log
+        st.markdown("""
+        <div class="terminal-bar">
+            <div class="t-dot" style="background:#ff5f57"></div>
+            <div class="t-dot" style="background:#ffbd2e"></div>
+            <div class="t-dot" style="background:#28ca41"></div>
+            <span style="font-size:11px;color:var(--t3);margin-left:8px;
+                         font-family:'JetBrains Mono',monospace;">sync.log</span>
+        </div>
+        """, unsafe_allow_html=True)
         log_ph = st.empty()
 
         new_rows  = []
-        updated   = backfilled = added = skipped = errors = 0
-        total     = len(gmail_threads)
-        now_str   = datetime.now().strftime("%Y-%m-%d %H:%M")
+        updated = backfilled = added = skipped = errors = 0
+        total   = len(gmail_threads)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         log_lines = []
 
         for i, thread in enumerate(gmail_threads, 1):
             tid        = thread["id"]
             meta       = meta_map.get(tid, {})
-            curr_count = meta.get("count",   0)
+            curr_count = meta.get("count", 0)
             meta_subj  = meta.get("subject", "")
             subj_key   = meta_subj.lower()
             status_msg = ""
 
-            progress_bar.progress(int(i / total * 100),
-                                  text=f"[{i}/{total}]  {meta_subj[:60]}")
+            progress_bar.progress(
+                int(i / total * 100),
+                text=f"[{i}/{total}]  {meta_subj[:60]}"
+            )
             try:
                 if tid in thread_map:
                     existing  = thread_map[tid]
                     old_count = existing["message_count"]
                     if curr_count <= old_count:
                         skipped   += 1
-                        status_msg = f"⏭  No change · {meta_subj[:48]}"
+                        status_msg = f"  skip  {meta_subj[:52]}"
                     else:
                         row_data = process_thread(gmail_svc, tid, vendor_db)
                         if row_data:
                             update_existing_row(sheets_svc, existing["sheet_row"], row_data)
                             thread_map[tid]["message_count"] = row_data["Thread Messages"]
                             updated   += 1
-                            status_msg = f"🔄  Updated · {row_data['Subject'][:48]}"
+                            status_msg = f"  upd   {row_data['Subject'][:52]}"
 
                 elif subj_key and subj_key in subject_map:
                     existing  = subject_map[subj_key]
@@ -863,7 +1197,7 @@ elif "Sync" in page:
                             ).execute()
                         skipped    += 1
                         backfilled += 1
-                        status_msg  = f"🔗  TID stored · {meta_subj[:48]}"
+                        status_msg  = f"  tid   {meta_subj[:52]}"
                     else:
                         row_data = process_thread(gmail_svc, tid, vendor_db)
                         if row_data:
@@ -872,38 +1206,42 @@ elif "Sync" in page:
                             thread_map[tid]["message_count"] = row_data["Thread Messages"]
                             updated    += 1
                             backfilled += 1
-                            status_msg  = f"🔄  Updated+TID · {row_data['Subject'][:42]}"
+                            status_msg  = f"  upd+  {row_data['Subject'][:46]}"
                 else:
                     if curr_count < 2:
                         skipped   += 1
-                        status_msg = f"⏭  Single msg · {meta_subj[:48]}"
+                        status_msg = f"  1msg  {meta_subj[:52]}"
                     else:
                         row_data = process_thread(gmail_svc, tid, vendor_db)
                         if row_data is None:
                             skipped   += 1
-                            status_msg = f"⏭  No body · {meta_subj[:50]}"
+                            status_msg = f"  none  {meta_subj[:52]}"
                         else:
                             new_rows.append(_build_new_row(row_data, now_str))
                             subject_map[row_data["Subject"].lower()] = {
                                 "sheet_row": None, "message_count": curr_count,
-                                "thread_id": tid,  "subject": row_data["Subject"],
+                                "thread_id": tid, "subject": row_data["Subject"],
                             }
                             added     += 1
-                            status_msg = f"🆕  Added · {row_data['Subject'][:48]}"
+                            status_msg = f"  new   {row_data['Subject'][:52]}"
             except Exception as exc:
                 errors    += 1
                 record_error(tid, meta_subj, "streamlit_sync", exc)
-                status_msg = f"❌  Error · {meta_subj[:40]} — {str(exc)[:45]}"
+                status_msg = f"  err   {meta_subj[:40]} — {str(exc)[:38]}"
 
-            log_lines.append(status_msg)
+            log_lines.append((status_msg, "new" if "new" in status_msg[:7]
+                              else "upd" if "upd" in status_msg[:7]
+                              else "err" if "err" in status_msg[:7] else "skip"))
+
             if i % 2 == 0 or i == total:
-                def _lcolor(l):
-                    if "🆕" in l:  return "#3DFFD0"
-                    if "🔄" in l:  return "#5BC8FF"
-                    if "❌" in l:  return "#FF5F5F"
-                    return "#FFBE3D"
-                html = "".join(f'<div style="color:{_lcolor(l)}">{l}</div>' for l in log_lines[-10:])
-                log_ph.markdown(f'<div class="log-area">{html}</div>', unsafe_allow_html=True)
+                color_map = {"new": "var(--acid)", "upd": "var(--ice)",
+                             "err": "var(--flame)", "skip": "var(--t3)"}
+                prefix_map = {"new": "+", "upd": "~", "err": "!", "skip": "·"}
+                html = "".join(
+                    f'<div style="color:{color_map[t]}">{prefix_map[t]}{l}</div>'
+                    for l, t in log_lines[-10:]
+                )
+                log_ph.markdown(f'<div class="terminal">{html}</div>', unsafe_allow_html=True)
 
         if not dry_run:
             if new_rows:
@@ -917,28 +1255,49 @@ elif "Sync" in page:
             "cache_entries": cs2.get("cached_entries", 0),
         })
 
-        progress_bar.progress(100, text="✅ Sync complete!")
+        progress_bar.progress(100, text="Complete")
         st.markdown("<br>", unsafe_allow_html=True)
-        if dry_run:
-            st.info("🔍 DRY RUN — nothing written to Google Sheets.")
-        else:
-            st.success("✅ Sync complete — Google Sheet updated.")
 
-        r1, r2, r3, r4, r5 = st.columns(5)
-        r1.metric("🆕 Added",      added)
-        r2.metric("🔄 Updated",    updated)
-        r3.metric("🔗 Backfilled", backfilled)
-        r4.metric("⏭️ Skipped",    skipped)
-        r5.metric("❌ Errors",     errors)
+        if dry_run:
+            st.info("Dry run — no changes written to Google Sheets.")
+        else:
+            st.success("Sync complete — Google Sheet updated.")
+
+        # Result cards
+        st.markdown(f"""
+        <div class="result-grid">
+            <div class="r-card">
+                <div class="r-label">Added</div>
+                <div class="r-value" style="color:var(--acid)">{added}</div>
+            </div>
+            <div class="r-card">
+                <div class="r-label">Updated</div>
+                <div class="r-value" style="color:var(--ice)">{updated}</div>
+            </div>
+            <div class="r-card">
+                <div class="r-label">Backfilled</div>
+                <div class="r-value" style="color:var(--lilac)">{backfilled}</div>
+            </div>
+            <div class="r-card">
+                <div class="r-label">Skipped</div>
+                <div class="r-value" style="color:var(--t3)">{skipped}</div>
+            </div>
+            <div class="r-card">
+                <div class="r-label">Errors</div>
+                <div class="r-value" style="color:var(--flame)">{errors}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         st.session_state.df_logs = None
 
 
 # ════════════════════════════════════════════════════════════════════════════════
 # PAGE: THREAD VIEWER
 # ════════════════════════════════════════════════════════════════════════════════
-elif "Thread" in page:
-    st.markdown('<div class="page-header">Thread Viewer</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">Browse · Filter · Review · Reply</div>', unsafe_allow_html=True)
+elif page == "Thread Viewer":
+    st.markdown('<div class="ph-eyebrow">Threads</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ph-title">Thread <em>Viewer</em></div>', unsafe_allow_html=True)
 
     df = st.session_state.df_logs if st.session_state.df_logs is not None else load_data_from_sheets()
 
@@ -946,129 +1305,172 @@ elif "Thread" in page:
         st.info("No data found. Run a sync first.")
         st.stop()
 
-    # ── Filters ───────────────────────────────────────────────────────────────
-    st.markdown('<div class="filter-card"><div class="filter-label">Filters</div>', unsafe_allow_html=True)
+    # ── Filter bar ────────────────────────────────────────────────────────────
+    st.markdown('<div class="filter-bar"><div class="sec-label">Filter Threads</div>', unsafe_allow_html=True)
     fa, fb, fc, fd, fe = st.columns(5)
-    with fa: intent_f = st.selectbox("Intent",        _opts(df, "Intent"))
-    with fb: reply_f  = st.selectbox("Reply Needed",  ["All", "Yes", "No"])
-    with fc: vendor_f = st.selectbox("Vendor",        _opts(df, "Vendor Name"))
-    with fd: div_f    = st.selectbox("Division",      _opts(df, "Division"))
-    # Pre-select from jump navigation if set
-    _sample_opts    = _opts(df, "Sample Status")
-    _jump_sample    = st.session_state.get("jump_sample_filter", "All")
-    _sample_default = _sample_opts.index(_jump_sample) if _jump_sample in _sample_opts else 0
-    with fe: sample_f = st.selectbox("Sample Status", _sample_opts, index=_sample_default)
-    # Consume the jump so it doesn't persist on next page switch
+    with fa:
+        intent_f = st.selectbox("Intent",       _opts(df, "Intent"),       label_visibility="visible")
+    with fb:
+        reply_f  = st.selectbox("Reply Needed", ["All","Yes","No"],         label_visibility="visible")
+    with fc:
+        vendor_f = st.selectbox("Vendor",        _opts(df, "Vendor Name"),  label_visibility="visible")
+    with fd:
+        div_f    = st.selectbox("Division",      _opts(df, "Division"),     label_visibility="visible")
+    with fe:
+        _sample_opts    = _opts(df, "Sample Status")
+        _jump_sample    = st.session_state.get("jump_sample_filter", "All")
+        _sample_default = _sample_opts.index(_jump_sample) if _jump_sample in _sample_opts else 0
+        sample_f = st.selectbox("Sample Status", _sample_opts, index=_sample_default, label_visibility="visible")
     st.session_state.jump_sample_filter = "All"
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Apply filters
     fdf = df.copy()
-    if intent_f  != "All" and "Intent"        in fdf.columns: fdf = fdf[fdf["Intent"]        == intent_f]
-    if reply_f   != "All" and "Reply Needed"  in fdf.columns: fdf = fdf[fdf["Reply Needed"]  == reply_f]
-    if vendor_f  != "All" and "Vendor Name"   in fdf.columns: fdf = fdf[fdf["Vendor Name"]   == vendor_f]
-    if div_f     != "All" and "Division"      in fdf.columns: fdf = fdf[fdf["Division"]      == div_f]
-    if sample_f  != "All" and "Sample Status" in fdf.columns: fdf = fdf[fdf["Sample Status"] == sample_f]
+    if intent_f != "All" and "Intent"        in fdf.columns: fdf = fdf[fdf["Intent"]        == intent_f]
+    if reply_f  != "All" and "Reply Needed"  in fdf.columns: fdf = fdf[fdf["Reply Needed"]  == reply_f]
+    if vendor_f != "All" and "Vendor Name"   in fdf.columns: fdf = fdf[fdf["Vendor Name"]   == vendor_f]
+    if div_f    != "All" and "Division"      in fdf.columns: fdf = fdf[fdf["Division"]       == div_f]
+    if sample_f != "All" and "Sample Status" in fdf.columns: fdf = fdf[fdf["Sample Status"] == sample_f]
 
     st.markdown(
-        f'<p style="color:#5A6A8A;font-size:12px;margin-bottom:16px;">'
-        f'Showing <b style="color:#3DFFD0">{len(fdf)}</b> of '
-        f'<b style="color:#9BAAC8">{len(df)}</b> threads</p>',
+        f'<div style="font-size:12px;color:var(--t3);margin-bottom:16px;'
+        f'font-family:\'JetBrains Mono\',monospace;">'
+        f'{len(fdf)} of {len(df)} threads</div>',
         unsafe_allow_html=True
     )
 
     # ── Thread cards ──────────────────────────────────────────────────────────
     for idx, row in fdf.iterrows():
-        vendor   = _safe(row, "Vendor Name", "Unknown Vendor")
-        subject  = _safe(row, "Subject",     "No Subject")
-        sent     = _safe(row, "Sent Date",   "")[:10]
-        intent   = _safe(row, "Intent",      "")
-        rn       = _safe(row, "Reply Needed","No")
+        vendor   = _safe(row, "Vendor Name",  "Unknown Vendor")
+        subject  = _safe(row, "Subject",      "No Subject")
+        sent     = _safe(row, "Sent Date",    "")[:10]
+        intent   = _safe(row, "Intent",       "")
+        rn       = _safe(row, "Reply Needed", "No")
         reminder = _safe(row, "Sample Reminder", "")
         ss       = _safe(row, "Sample Status",   "None")
 
-        pfx = "⚠️ " if reminder.startswith("⚠️") else ("🔴 " if rn == "Yes" else "")
-        exp_label = f"{pfx}{sent}  ·  {vendor}  ·  {subject[:65]}"
+        # Expander label — clear priority signals
+        flag    = "! " if reminder.startswith("⚠️") else ("· " if rn == "Yes" else "  ")
+        exp_label = f"{flag}{sent}  {vendor}  —  {subject[:60]}"
 
         with st.expander(exp_label, expanded=False):
 
-            # Header badges
-            bdg  = _intent_badge(intent)
-            bdg += (' <span class="badge b-coral">⚠ Reply Needed</span>'
-                    if rn == "Yes"
-                    else ' <span class="badge b-teal">✓ No Reply</span>')
+            # Intent + status badges
+            bdg = _intent_badge(intent)
+            if rn == "Yes":
+                bdg += ' <span class="badge b-flame">Reply needed</span>'
+            else:
+                bdg += ' <span class="badge b-acid">No reply</span>'
             if reminder.startswith("⚠️"):
-                bdg += f' <span class="badge b-amber">{reminder}</span>'
-            st.markdown(f'<div style="margin-bottom:18px;">{bdg}</div>', unsafe_allow_html=True)
+                bdg += f' <span class="badge b-gold">Chase</span>'
+            st.markdown(f'<div style="margin-bottom:20px;">{bdg}</div>', unsafe_allow_html=True)
 
             col_ov, col_meta, col_right = st.columns([5, 3, 3])
 
-            # AI Overview
+            # ── AI Overview ──
             with col_ov:
-                st.markdown('<div style="font-size:10px;color:#5A6A8A;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;margin-bottom:10px;">AI Overview</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="sec-label" style="margin-top:0">AI Overview</div>',
+                    unsafe_allow_html=True
+                )
                 overview = _safe(row, "AI Overview", "")
                 lines    = [l.strip() for l in overview.split("\n") if l.strip()]
                 if lines:
-                    bhtml = "".join(f'<div class="ov-bullet">• {l.lstrip("•–- ")}</div>' for l in lines)
-                    st.markdown(bhtml, unsafe_allow_html=True)
+                    html = "".join(
+                        f'<div class="ov-line">{l.lstrip("•–- ")}</div>' for l in lines
+                    )
+                    st.markdown(html, unsafe_allow_html=True)
                 else:
-                    st.markdown('<span style="color:#5A6A8A;font-size:13px;">No overview available.</span>', unsafe_allow_html=True)
+                    st.markdown(
+                        '<span style="color:var(--t3);font-size:13px;">No overview available.</span>',
+                        unsafe_allow_html=True
+                    )
 
-            # Thread details
+            # ── Thread Details ──
             with col_meta:
-                st.markdown('<div style="font-size:10px;color:#5A6A8A;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;margin-bottom:10px;">Thread Details</div>', unsafe_allow_html=True)
-                pills_html = "".join(filter(None, [
-                    _dpill("Division", _safe(row, "Division"),     "sky"),
-                    _dpill("Style",    _safe(row, "Style No"),     "violet"),
-                    _dpill("Colour",   _safe(row, "Colour"),       "coral"),
-                    _dpill("PO",       _safe(row, "PO Number"),    "amber"),
-                    _dpill("Msgs",     _safe(row, "Thread Messages")),
-                    _dpill("Sent",     sent),
-                    _dpill("Vendor",   vendor, "sky"),
-                    _dpill("Class",    _safe(row, "Partner Classification")),
-                    _dpill("CC",       _safe(row, "CC")),
+                st.markdown(
+                    '<div class="sec-label" style="margin-top:0">Thread Details</div>',
+                    unsafe_allow_html=True
+                )
+                pills = "".join(filter(None, [
+                    _dpill("Division", _safe(row,"Division"),          "ice"),
+                    _dpill("Style",    _safe(row,"Style No"),          "lilac"),
+                    _dpill("Colour",   _safe(row,"Colour"),            "flame"),
+                    _dpill("PO",       _safe(row,"PO Number"),         "gold"),
+                    _dpill("Msgs",     _safe(row,"Thread Messages")),
+                    _dpill("Date",     sent),
+                    _dpill("Vendor",   vendor,                         "ice"),
+                    _dpill("Class",    _safe(row,"Partner Classification")),
+                    _dpill("CC",       _safe(row,"CC")),
                 ]))
-                st.markdown(pills_html, unsafe_allow_html=True)
+                st.markdown(pills, unsafe_allow_html=True)
 
                 att   = _safe(row, "Attachments",  "")
                 links = _safe(row, "Shared Links", "")
                 if att:
-                    st.markdown(f'<div style="margin-top:10px;font-size:11px;color:#5A6A8A;">📎 {att}</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div style="margin-top:10px;font-size:11px;color:var(--t3);">↳ {att}</div>',
+                        unsafe_allow_html=True
+                    )
                 if links:
-                    st.markdown(f'<div style="font-size:11px;color:#5BC8FF;margin-top:4px;">🔗 {links}</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div style="font-size:11px;color:var(--ice);margin-top:4px;">⎋ {links}</div>',
+                        unsafe_allow_html=True
+                    )
 
-            # Shipment + Sample
+            # ── Shipment + Sample ──
             with col_right:
-                st.markdown('<div style="font-size:10px;color:#5A6A8A;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;margin-bottom:10px;">Shipment &amp; Sample</div>', unsafe_allow_html=True)
-                awb     = _safe(row, "AWB No",          "")
-                carrier = _safe(row, "Shipment Company","")
-                ship_dt = _safe(row, "Shipment Date",   "")
+                st.markdown(
+                    '<div class="sec-label" style="margin-top:0">Shipment & Sample</div>',
+                    unsafe_allow_html=True
+                )
+                awb     = _safe(row, "AWB No",           "")
+                carrier = _safe(row, "Shipment Company", "")
+                ship_dt = _safe(row, "Shipment Date",    "")
                 if awb or carrier:
                     st.markdown(f"""
-                    <div class="ship-card">
-                        <div class="ship-carrier">📦 {carrier or 'Unknown carrier'}</div>
+                    <div class="ship-block">
+                        <div class="ship-carrier">↑ {carrier or 'Unknown carrier'}</div>
                         <div class="ship-awb">{awb or 'No AWB yet'}</div>
-                        {"" if not ship_dt else f'<div class="ship-date">Shipped: {ship_dt}</div>'}
+                        {"" if not ship_dt else f'<div class="ship-date">{ship_dt}</div>'}
                     </div>
                     """, unsafe_allow_html=True)
                 else:
-                    st.markdown('<div style="color:#5A6A8A;font-size:12px;padding:8px 0;">No shipment info yet.</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        '<div class="ship-none" style="padding:10px 0;">No shipment info.</div>',
+                        unsafe_allow_html=True
+                    )
 
-                st.markdown('<div style="margin-top:14px;font-size:12px;color:#5A6A8A;margin-bottom:6px;">Sample Status</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="margin-top:14px;font-size:11px;font-weight:600;'
+                    'letter-spacing:0.08em;text-transform:uppercase;color:var(--t3);'
+                    'margin-bottom:7px;">Sample</div>',
+                    unsafe_allow_html=True
+                )
                 st.markdown(_sample_pill(ss), unsafe_allow_html=True)
 
-            # Reply Draft
+            # ── Reply Draft ──
             reply = _safe(row, "Reply Draft", "")
             if reply:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown(f'<div class="reply-label">✉ Suggested Reply Draft</div><div class="reply-box">{reply}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="reply-header">Suggested reply</div>'
+                    f'<div class="reply-body">{reply}</div>',
+                    unsafe_allow_html=True
+                )
                 dl, _ = st.columns([1, 4])
                 with dl:
                     st.download_button(
-                        label="📋 Download reply",
+                        label="↓  Download reply",
                         data=reply,
-                        file_name=f"reply_{subject[:25].replace(' ', '_')}.txt",
+                        file_name=f"reply_{subject[:25].replace(' ','_')}.txt",
                         mime="text/plain",
                         key=f"dl_{idx}",
+                        help="Download this reply draft as a .txt file"
                     )
             else:
-                st.markdown('<div style="color:#5A6A8A;font-size:12px;margin-top:10px;">No reply draft — this thread is marked as no reply needed.</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="color:var(--t3);font-size:12px;margin-top:10px;">'
+                    'No reply draft — thread marked as no action needed.</div>',
+                    unsafe_allow_html=True
+                )
