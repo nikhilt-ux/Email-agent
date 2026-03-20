@@ -1092,22 +1092,55 @@ if page == "Dashboard":
                 .sort_values("Threads", ascending=False).head(12).reset_index()
             )
             for _, vrow in vstats.iterrows():
-                rn  = int(vrow["Reply_Needed"])
-                col = "var(--flame)" if rn > 0 else "var(--acid)"
-                st.markdown(f"""
-                <div class="vendor-strip">
-                    <span class="vn">{vrow['Vendor Name']}</span>
-                    <span style="font-size:12px;color:var(--t3);">
-                        <span class="vt">{vrow['Threads']}</span>
-                        <span style="margin-left:3px;font-size:11px">threads</span>
-                    </span>
-                    <span style="font-size:12px;color:var(--t3);">
-                        Reply needed:
-                        <span class="vr" style="color:{col}">{rn}</span>
-                    </span>
-                    <span class="vd">Last active {str(vrow.get('Latest',''))[:10]}</span>
-                </div>
-                """, unsafe_allow_html=True)
+                vname     = vrow["Vendor Name"]
+                rn        = int(vrow["Reply_Needed"])
+                last_date = str(vrow.get("Latest",""))[:10]
+                n_threads = int(vrow["Threads"])
+
+                exp_label = (
+                    f"{vname}  ·  {n_threads} thread{'s' if n_threads!=1 else ''}  "
+                    f"·  {rn} reply needed  ·  {last_date}"
+                )
+                with st.expander(exp_label, expanded=False):
+                    v_threads = (
+                        vdf[vdf["Vendor Name"] == vname]
+                        .sort_values("Sent Date", ascending=False)
+                        .reset_index(drop=True)
+                    )
+                    for ti, trow in v_threads.iterrows():
+                        subj     = _safe(trow, "Subject",      "No Subject")
+                        sent     = _safe(trow, "Sent Date",    "")[:10]
+                        overview = _safe(trow, "AI Overview",  "")
+                        intent   = _safe(trow, "Intent",       "")
+                        t_rn     = _safe(trow, "Reply Needed", "No")
+                        ss       = _safe(trow, "Sample Status","None")
+
+                        bdg = _intent_badge(intent)
+                        if t_rn == "Yes":
+                            bdg += ' <span class="badge b-flame">Reply needed</span>'
+                        ss_icons = {"Dispatched":"↑","Received":"↓","Approved":"✓",
+                                    "Rejected":"✕","Pending":"◌","None":"—"}
+                        ss_icon  = ss_icons.get(ss, "")
+                        ss_cls   = f"ss-{ss}" if ss in ("Dispatched","Received","Approved","Rejected","Pending") else "ss-None"
+
+                        ov_lines = [l.strip().lstrip("•–- ") for l in overview.split("\n") if l.strip()]
+                        ov_html  = "".join(f'<div class="ov-line">{l}</div>' for l in ov_lines) if ov_lines else \
+                                   '<div style="font-size:12px;color:var(--t3);padding:4px 0;">No AI overview available.</div>'
+
+                        border_bottom = "border-bottom:1px solid var(--line);" if ti < len(v_threads)-1 else ""
+                        st.markdown(f"""
+                        <div style="padding:14px 0;{border_bottom}">
+                            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+                                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t3);">{sent}</span>
+                                <span style="font-size:13px;font-weight:600;color:var(--t1);flex:1;min-width:0;">{subj}</span>
+                                {bdg}
+                                <span class="ss-pill {ss_cls}" style="font-size:10px;">{ss_icon} {ss}</span>
+                            </div>
+                            {ov_html}
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
 
 # ════════════════════════════════════════════════════════════════════════════════
